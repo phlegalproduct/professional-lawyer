@@ -176,8 +176,10 @@ export const Queue:FC = () => {
     try {
       worklet.current = new AudioWorkletNode(ctx, 'moshi-processor');
     } catch (err) {
-      await ctx.audioWorklet.addModule(moshiProcessorUrl);
-      worklet.current = new AudioWorkletNode(ctx, 'moshi-processor');
+      //await ctx.audioWorklet.addModule(moshiProcessorUrl);
+      await ctx.audioWorklet.addModule(`${moshiProcessorUrl}?v=3`);
+
+	worklet.current = new AudioWorkletNode(ctx, 'moshi-processor');
     }
     worklet.current.connect(ctx.destination);
   }, [audioContext, worklet]);
