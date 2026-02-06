@@ -151,7 +151,17 @@ class MoshiProcessor extends AudioWorkletProcessor {
     while (out_idx < output.length && this.frames.length) {
       let first = this.frames[0];
       let to_copy = Math.min(first.length - this.offsetInFirstBuffer, output.length - out_idx);
-      output.set(first.subarray(this.offsetInFirstBuffer, this.offsetInFirstBuffer + to_copy), out_idx);
+      // Copy samples and clamp to prevent clipping/distortion
+      const sourceStart = this.offsetInFirstBuffer;
+      for (let i = 0; i < to_copy; i++) {
+        let sample = first[sourceStart + i];
+        // Handle invalid values (NaN, Infinity) and clamp to valid range [-1.0, 1.0]
+        if (!isFinite(sample)) {
+          sample = 0.0;
+        }
+        // Clamp audio samples to prevent clipping/distortion
+        output[out_idx + i] = Math.max(-1.0, Math.min(1.0, sample));
+      }
       this.offsetInFirstBuffer += to_copy;
       out_idx += to_copy;
       if (this.offsetInFirstBuffer == first.length) {
