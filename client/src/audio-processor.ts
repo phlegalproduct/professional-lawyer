@@ -13,9 +13,9 @@ function asSamples(ms) {
 class MoshiProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    console.log("Moshi processor lives", currentFrame, sampleRate);
+    console.log("******Moshi processor lives", currentFrame, sampleRate);
+	  console.log("=== MOSHI WORKLET CUSTOM BUILD v3 ===");
     console.log(currentTime);
-	console.log("=== MOSHI WORKLET CUSTOM BUILD v3 ===");
 
     // ===== WAN-SAFE BUFFER DEFAULTS (smooth > latency) =====
     // These values target ~250–400ms RTT with jitter.
