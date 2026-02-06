@@ -187,15 +187,24 @@ class MoshiProcessor extends AudioWorkletProcessor {
     while (out_idx < output.length && this.frames.length) {
       let first = this.frames[0];
       let to_copy = Math.min(first.length - this.offsetInFirstBuffer, output.length - out_idx);
-      // Copy samples and clamp to prevent clipping/distortion
+      // Copy samples with soft limiting to prevent clipping/distortion
       const sourceStart = this.offsetInFirstBuffer;
       for (let i = 0; i < to_copy; i++) {
         let sample = first[sourceStart + i];
-        // Handle invalid values (NaN, Infinity) and clamp to valid range [-1.0, 1.0]
+        // Handle invalid values (NaN, Infinity)
         if (!isFinite(sample)) {
           sample = 0.0;
         }
-        // Clamp audio samples to prevent clipping/distortion
+        // Soft limiter: smooth compression above threshold instead of hard clipping
+        // This prevents harsh distortion while still preventing clipping
+        const threshold = 0.95;
+        const ratio = 0.3; // compression ratio above threshold
+        if (Math.abs(sample) > threshold) {
+          const sign = sample >= 0 ? 1 : -1;
+          const excess = Math.abs(sample) - threshold;
+          sample = sign * (threshold + excess * ratio);
+        }
+        // Final safety clamp (should rarely be needed with soft limiter)
         output[out_idx + i] = Math.max(-1.0, Math.min(1.0, sample));
       }
       this.offsetInFirstBuffer += to_copy;
@@ -207,11 +216,15 @@ class MoshiProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Fade-in on resume to avoid clicks
+    // Smooth fade-in on resume to avoid clicks and distortion
     if (this.firstOut) {
       this.firstOut = false;
-      for (let i = 0; i < out_idx; i++) {
-        output[i] *= i / Math.max(1, out_idx);
+      // Use a smoother fade curve (ease-in) for better sound quality
+      const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.01)); // 10ms fade
+      for (let i = 0; i < fadeLength; i++) {
+        // Smooth ease-in curve: x^2 for gentler fade
+        const fade = (i / fadeLength) * (i / fadeLength);
+        output[i] *= fade;
       }
     }
 
@@ -226,11 +239,13 @@ class MoshiProcessor extends AudioWorkletProcessor {
       this.partialBufferSamples = Math.min(this.partialBufferSamples, this.maxPartialWithIncrements);
       console.log("Increased partial buffer to", asMs(this.partialBufferSamples));
 
-      // short fade-out on the last ~5ms to avoid clicks
-      const fade = Math.min(out_idx, 128);
-      for (let i = 0; i < fade; i++) {
-        const idx = out_idx - fade + i;
-        output[idx] *= (fade - i) / fade;
+      // Smooth fade-out on the last samples to avoid clicks and distortion
+      const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.01)); // 10ms fade
+      for (let i = 0; i < fadeLength; i++) {
+        const idx = out_idx - fadeLength + i;
+        // Smooth ease-out curve: (1-x)^2 for gentler fade
+        const fade = 1.0 - ((fadeLength - i) / fadeLength) * ((fadeLength - i) / fadeLength);
+        output[idx] *= fade;
       }
 
       // pad remainder with silence
