@@ -187,26 +187,23 @@ class MoshiProcessor extends AudioWorkletProcessor {
     while (out_idx < output.length && this.frames.length) {
       let first = this.frames[0];
       let to_copy = Math.min(first.length - this.offsetInFirstBuffer, output.length - out_idx);
-      // Copy samples with soft limiting to prevent clipping/distortion
       const sourceStart = this.offsetInFirstBuffer;
+      
+      // Use set() for efficient copying, then clamp only if needed
+      output.set(first.subarray(sourceStart, sourceStart + to_copy), out_idx);
+      
+      // Check and fix any out-of-range or invalid samples (should be rare)
       for (let i = 0; i < to_copy; i++) {
-        let sample = first[sourceStart + i];
-        // Handle invalid values (NaN, Infinity)
+        const sample = output[out_idx + i];
         if (!isFinite(sample)) {
-          sample = 0.0;
+          output[out_idx + i] = 0.0;
+        } else if (sample > 1.0) {
+          output[out_idx + i] = 1.0;
+        } else if (sample < -1.0) {
+          output[out_idx + i] = -1.0;
         }
-        // Soft limiter: smooth compression above threshold instead of hard clipping
-        // This prevents harsh distortion while still preventing clipping
-        const threshold = 0.95;
-        const ratio = 0.3; // compression ratio above threshold
-        if (Math.abs(sample) > threshold) {
-          const sign = sample >= 0 ? 1 : -1;
-          const excess = Math.abs(sample) - threshold;
-          sample = sign * (threshold + excess * ratio);
-        }
-        // Final safety clamp (should rarely be needed with soft limiter)
-        output[out_idx + i] = Math.max(-1.0, Math.min(1.0, sample));
       }
+      
       this.offsetInFirstBuffer += to_copy;
       out_idx += to_copy;
 
@@ -216,15 +213,17 @@ class MoshiProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Smooth fade-in on resume to avoid clicks and distortion
+    // Smooth fade-in on resume to avoid clicks - apply BEFORE any other processing
     if (this.firstOut) {
       this.firstOut = false;
       // Use a smoother fade curve (ease-in) for better sound quality
-      const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.01)); // 10ms fade
-      for (let i = 0; i < fadeLength; i++) {
-        // Smooth ease-in curve: x^2 for gentler fade
-        const fade = (i / fadeLength) * (i / fadeLength);
-        output[i] *= fade;
+      const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.005)); // 5ms fade (shorter, smoother)
+      if (fadeLength > 0) {
+        for (let i = 0; i < fadeLength; i++) {
+          // Smooth ease-in curve: x^2 for gentler fade
+          const fade = (i / fadeLength) * (i / fadeLength);
+          output[i] *= fade;
+        }
       }
     }
 
@@ -239,13 +238,19 @@ class MoshiProcessor extends AudioWorkletProcessor {
       this.partialBufferSamples = Math.min(this.partialBufferSamples, this.maxPartialWithIncrements);
       console.log("Increased partial buffer to", asMs(this.partialBufferSamples));
 
-      // Smooth fade-out on the last samples to avoid clicks and distortion
-      const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.01)); // 10ms fade
-      for (let i = 0; i < fadeLength; i++) {
-        const idx = out_idx - fadeLength + i;
-        // Smooth ease-out curve: (1-x)^2 for gentler fade
-        const fade = 1.0 - ((fadeLength - i) / fadeLength) * ((fadeLength - i) / fadeLength);
-        output[idx] *= fade;
+      // Smooth fade-out on the last samples to avoid clicks - only if we have samples
+      if (out_idx > 0) {
+        const fadeLength = Math.min(out_idx, Math.round(sampleRate * 0.005)); // 5ms fade (shorter, smoother)
+        if (fadeLength > 0) {
+          for (let i = 0; i < fadeLength; i++) {
+            const idx = out_idx - fadeLength + i;
+            if (idx >= 0) {
+              // Smooth ease-out curve: (1-x)^2 for gentler fade
+              const fade = 1.0 - ((fadeLength - i) / fadeLength) * ((fadeLength - i) / fadeLength);
+              output[idx] *= fade;
+            }
+          }
+        }
       }
 
       // pad remainder with silence
