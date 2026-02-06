@@ -163,7 +163,8 @@ export const Queue:FC = () => {
 
   const startProcessor = useCallback(async () => {
     if(!audioContext.current) {
-      audioContext.current = new AudioContext();
+      audioContext.current = new AudioContext({ sampleRate: 24000 });
+      // audioContext.current = new AudioContext();
       // Prewarm decoder worker as soon as we have audio context
       // This gives WASM time to load while user grants mic access
       prewarmDecoderWorker(audioContext.current.sampleRate);
