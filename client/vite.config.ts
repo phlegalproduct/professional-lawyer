@@ -18,7 +18,12 @@ export default defineConfig(({mode}) => {
       },
       proxy:{
         ...proxyConf,
-      }
+      },
+      headers: {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+      },
     },
     plugins: [
       topLevelAwait({
@@ -28,5 +33,15 @@ export default defineConfig(({mode}) => {
         promiseImportName: i => `__tla_${i}`,
       }),
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          // Ensure filenames include hash for cache busting
+          entryFileNames: `assets/[name]-[hash].js`,
+          chunkFileNames: `assets/[name]-[hash].js`,
+          assetFileNames: `assets/[name]-[hash].[ext]`,
+        },
+      },
+    },
   };
 });
