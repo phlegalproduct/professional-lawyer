@@ -213,7 +213,7 @@ class MoshiProcessor extends AudioWorkletProcessor {
 
     let out_idx = 0;
 
-    // Fill output from queued frames
+    // BULLETPROOF: Fill output from queued frames with crossfade to prevent discontinuities
     while (out_idx < output.length && this.frames.length) {
       let first = this.frames[0];
       let to_copy = Math.min(first.length - this.offsetInFirstBuffer, output.length - out_idx);
@@ -222,11 +222,12 @@ class MoshiProcessor extends AudioWorkletProcessor {
       // Use set() for efficient copying, then clamp and validate
       output.set(first.subarray(sourceStart, sourceStart + to_copy), out_idx);
       
-      // Check and fix any out-of-range or invalid samples
+      // BULLETPROOF: Validate and fix ALL samples to prevent any artifacts
       for (let i = 0; i < to_copy; i++) {
         const sample = output[out_idx + i];
-        if (!isFinite(sample)) {
-          output[out_idx + i] = 0.0;
+        if (!isFinite(sample) || isNaN(sample)) {
+          // Replace NaN/Infinity with last valid sample or 0
+          output[out_idx + i] = this.lastSample;
         } else if (sample > 1.0) {
           output[out_idx + i] = 1.0;
         } else if (sample < -1.0) {
@@ -234,7 +235,26 @@ class MoshiProcessor extends AudioWorkletProcessor {
         }
       }
       
-      // Store last sample for tracking (used for debugging/monitoring)
+      // BULLETPROOF: Crossfade at frame boundaries to prevent discontinuities during long playback
+      // This prevents clicks/pops that can accumulate into clutter over time
+      // Only crossfade if we're starting a new frame (offsetInFirstBuffer was reset to 0)
+      if (sourceStart === 0 && out_idx > 0 && this.frames.length > 1) {
+        // We're starting a new frame - crossfade from previous frame's last sample
+        const crossfadeLength = Math.min(8, to_copy); // 8 samples (~0.3ms at 24kHz)
+        if (crossfadeLength > 0 && this.lastSample !== 0.0) {
+          const prevLastSample = this.lastSample;
+          const newFirstSample = output[out_idx];
+          // Only crossfade if there's a significant difference (prevents unnecessary processing)
+          if (Math.abs(prevLastSample - newFirstSample) > 0.01) {
+            for (let i = 0; i < crossfadeLength; i++) {
+              const fade = i / crossfadeLength;
+              output[out_idx + i] = prevLastSample * (1 - fade) + newFirstSample * fade;
+            }
+          }
+        }
+      }
+      
+      // Store last sample for crossfade and tracking
       if (to_copy > 0) {
         this.lastSample = output[out_idx + to_copy - 1];
       }
@@ -300,8 +320,25 @@ class MoshiProcessor extends AudioWorkletProcessor {
     this.actualAudioPlayed += actualDuration;
     this.timeInStream += actualDuration;
     
-    // Log periodically to track playback health
-    if (Math.floor(this.totalAudioPlayed * 10) % 5 === 0 && this.totalAudioPlayed > 0.1) {
+    // BULLETPROOF: Prevent buffer from growing too large during long responses
+    // If buffer exceeds 2 seconds, aggressively trim to prevent memory issues and state accumulation
+    if (this.currentSamples() > asSamples(2000)) {
+      const targetBuffer = asSamples(800); // Trim to 800ms
+      while (this.currentSamples() > targetBuffer && this.frames.length > 1) {
+        const first = this.frames[0];
+        const toRemove = Math.min(first.length - this.offsetInFirstBuffer, this.currentSamples() - targetBuffer);
+        this.offsetInFirstBuffer += toRemove;
+        this.timeInStream += toRemove / sampleRate;
+        if (this.offsetInFirstBuffer >= first.length) {
+          this.frames.shift();
+          this.offsetInFirstBuffer = 0;
+        }
+      }
+      console.log(`[WORKLET-DEBUG] ⚠️ Buffer trimmed: ${asMs(this.currentSamples())}ms (prevented overflow)`);
+    }
+    
+    // Log periodically to track playback health (reduced frequency)
+    if (Math.floor(this.totalAudioPlayed * 2) % 10 === 0 && this.totalAudioPlayed > 0.1) {
       console.log(`[WORKLET-DEBUG] Playback stats: actualPlayed=${this.actualAudioPlayed.toFixed(3)}s, totalPlayed=${this.totalAudioPlayed.toFixed(3)}s, buffer=${asMs(this.currentSamples())}ms, frames=${this.frames.length}, underrun=${outputDuration - actualDuration > 0.001 ? 'YES' : 'NO'}`);
     }
 

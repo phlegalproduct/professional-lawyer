@@ -95,6 +95,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const playbackStoppedTime = useRef<number | null>(null); // Track when playback stopped
   const lastTextMessageCount = useRef(0); // Track text message count to detect new responses
   const pendingReset = useRef(false); // Flag to indicate decoder reset is pending
+  const lastPeriodicResetTime = useRef<number | null>(null); // Track when we last did a periodic reset
+  const continuousPlaybackStartTime = useRef<number | null>(null); // Track when continuous playback started
   const workletStats = useRef<WorkletStats>({
     totalAudioPlayed: 0,
     actualAudioPlayed: 0,
@@ -124,6 +126,63 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       if (!isSilent) {
         receivedDuration.current += duration;
         lastNonSilentAudioTime.current = now;
+      }
+      
+      // BULLETPROOF: Aggressive periodic reset during long responses to prevent ALL state accumulation
+      // Reset decoder every 8 seconds during continuous playback to prevent ANY clutter
+      // We reset during silence AND also proactively before silence if needed
+      if (hasStartedPlayingAudio.current && 
+          continuousPlaybackStartTime.current !== null &&
+          decoderWorker.current &&
+          !pendingReset.current) {
+        const continuousPlaybackDuration = now - continuousPlaybackStartTime.current;
+        const timeSinceLastPeriodicReset = lastPeriodicResetTime.current ? now - lastPeriodicResetTime.current : continuousPlaybackDuration;
+        
+        // More aggressive: Reset every 8 seconds (instead of 15) to prevent state accumulation
+        // Reset during silence OR if we've been playing for a while (proactive reset)
+        const shouldPeriodicReset = timeSinceLastPeriodicReset > 8000 && 
+          (isSilent || (continuousPlaybackDuration > 10000 && timeSinceLastPeriodicReset > 12000));
+        
+        if (shouldPeriodicReset) {
+          console.log(`[AUDIO-DEBUG] ⚠️ PERIODIC RESET during long response (${continuousPlaybackDuration.toFixed(0)}ms continuous, ${timeSinceLastPeriodicReset.toFixed(0)}ms since last reset) - Preventing state accumulation`);
+          
+          pendingReset.current = true;
+          lastPeriodicResetTime.current = now;
+          
+          // CRITICAL: Also reset worklet buffer to clear any accumulated frames
+          worklet.current.port.postMessage({type: "reset"});
+          
+          // Re-initialize decoder worker to clear ALL accumulated state (resampler, buffers, etc.)
+          const bufferLength = 960 * audioContext.current.sampleRate / 24000;
+          decoderWorker.current.postMessage({
+            command: "init",
+            bufferLength: bufferLength,
+            decoderSampleRate: 24000,
+            outputBufferSampleRate: audioContext.current.sampleRate,
+            resampleQuality: 3,
+          });
+          
+          // Send warmup BOS page after a short delay
+          setTimeout(() => {
+            const bosPage = createWarmupBosPage();
+            decoderWorker.current?.postMessage({
+              command: "decode",
+              pages: bosPage,
+            });
+            console.log(`[AUDIO-DEBUG]   Periodic reset: Warmup BOS page sent, worklet reset`);
+            
+            // Clear reset flag after warmup
+            setTimeout(() => {
+              pendingReset.current = false;
+              // Reset continuous playback tracking to start fresh
+              continuousPlaybackStartTime.current = now;
+              console.log(`[AUDIO-DEBUG]   Periodic reset complete, fresh start`);
+            }, 50);
+          }, 100);
+          
+          // Don't process this frame during reset
+          return;
+        }
       }
       
       // Only log non-silent frames to reduce console noise
@@ -167,6 +226,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         hasStartedPlayingAudio.current = true;
         lastPlaybackTime.current = now;
         playbackStoppedTime.current = null;
+        continuousPlaybackStartTime.current = now;
         console.log(`[AUDIO-DEBUG] Audio playback started! actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s`);
       }
       
@@ -277,17 +337,17 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     }
     
     if ((isBOS && hasStartedPlayingAudio.current) || isLikelyNewResponse) {
-      // New Opus stream detected after we've started playing audio - reset worklet AND re-initialize decoder BEFORE decoding
-      // This prevents distortion/clutter from carrying over between responses
-      // The server uses a single continuous Opus stream, so we need to reset decoder state between responses
-      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet and re-initializing decoder to prevent clutter`);
+      // BULLETPROOF: Comprehensive reset for new responses - clear ALL state
+      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Comprehensive reset to prevent clutter`);
       console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s`);
       
-      // Reset worklet
+      // Set pending reset flag FIRST to prevent any processing during reset
+      pendingReset.current = true;
+      
+      // Reset worklet to clear all buffered frames
       worklet.current.port.postMessage({type: "reset"});
       
-      // Re-initialize decoder worker to clear all internal state (resampler, buffers, etc.)
-      // The decoder worker doesn't support a "reset" command, so we must re-init it
+      // Re-initialize decoder worker to clear ALL internal state (resampler, buffers, decoder state)
       const bufferLength = 960 * audioContext.current.sampleRate / 24000;
       decoderWorker.current.postMessage({
         command: "init",
@@ -306,14 +366,23 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
           pages: bosPage,
         });
         console.log(`[AUDIO-DEBUG]   Warmup BOS page sent to re-initialized decoder`);
-      }, 50);
+        
+        // Clear reset flag after warmup completes
+        setTimeout(() => {
+          pendingReset.current = false;
+          console.log(`[AUDIO-DEBUG]   Reset complete, ready for new audio`);
+        }, 50);
+      }, 100);
       
-      // Reset the flags so we don't reset on the very next BOS
+      // Reset ALL flags and tracking state
       hasStartedPlayingAudio.current = false;
       receivedDuration.current = 0;
       lastPlaybackTime.current = null;
       playbackStoppedTime.current = null;
-      console.log(`[AUDIO-DEBUG]   Reset complete, hasStartedPlayingAudio set to false`);
+      continuousPlaybackStartTime.current = null;
+      lastPeriodicResetTime.current = null;
+      lastNonSilentAudioTime.current = null;
+      console.log(`[AUDIO-DEBUG]   All state cleared, fresh start`);
     }
     
     if (midx < 5) {
@@ -371,6 +440,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     playbackStoppedTime.current = null;
     pendingReset.current = false;
     lastTextMessageCount.current = 0;
+    continuousPlaybackStartTime.current = null; // Reset continuous playback tracking
+    lastPeriodicResetTime.current = null; // Reset periodic reset tracking
     console.log(`[AUDIO-DEBUG]   Worklet reset sent, flags cleared`);
     console.log(Date.now() % 1000, "Should start in a bit - decoder ready:", decoderReady);
     startRecording();
