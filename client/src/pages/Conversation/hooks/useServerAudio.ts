@@ -264,6 +264,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         decodeAudio(message.data);
         //For stats purposes for now
         totalAudioMessages.current++;
+      }
       // Note: We do NOT reset on text messages because:
       // 1. Text messages arrive incrementally during a response (as tokens are generated)
       // 2. Resetting on every text message causes stuttering/cutting words
