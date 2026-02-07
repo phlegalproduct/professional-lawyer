@@ -14,7 +14,7 @@ class MoshiProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     console.log("******Moshi processor lives", currentFrame, sampleRate);
-	  console.log("=== MOSHI WORKLET CUSTOM BUILD v3 ===");
+	  console.log("=== MOSHI WORKLET CUSTOM BUILD v4 ===");
     console.log(currentTime);
 
     // ===== WAN-SAFE BUFFER DEFAULTS (smooth > latency) =====
