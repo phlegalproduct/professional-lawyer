@@ -208,7 +208,6 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     }
     
     const now = Date.now();
-    const timeSinceLastAudio = lastAudioMessageTime.current ? now - lastAudioMessageTime.current : null;
     lastAudioMessageTime.current = now;
     
     // Detect BOS (Beginning of Stream) page - indicates a new Opus stream

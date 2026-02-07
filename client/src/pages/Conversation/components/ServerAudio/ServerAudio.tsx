@@ -2,7 +2,6 @@ import { FC, useRef, useEffect } from "react";
 import { AudioStats, useServerAudio } from "../../hooks/useServerAudio";
 import { ServerVisualizer } from "../AudioVisualizer/ServerVisualizer";
 import { type ThemeType } from "../../hooks/useSystemTheme";
-import { useMediaContext } from "../../MediaContext";
 
 type ServerAudioProps = {
   setGetAudioStats: (getAudioStats: () => AudioStats) => void;
