@@ -1,8 +1,9 @@
 // Track decoder worker errors to detect failed initialization
 let lastWorkerError: Error | null = null;
 
-// Minimal valid Ogg BOS page with OpusHead header (mono, 48kHz)
+// Minimal valid Ogg BOS page with OpusHead header (mono, 24kHz)
 // This triggers the decoder's internal init() to create buffers
+// Note: Opus internally works at 48kHz, but we configure decoder for 24kHz input
 const createWarmupBosPage = (): Uint8Array => {
   // OpusHead: "OpusHead" + version(1) + channels(1) + preskip(2) + samplerate(4) + gain(2) + mapping(1)
   const opusHead = new Uint8Array([
@@ -10,7 +11,7 @@ const createWarmupBosPage = (): Uint8Array => {
     0x01,       // Version 1
     0x01,       // 1 channel (mono)
     0x38, 0x01, // Pre-skip: 312 samples (little-endian)
-    0x80, 0xBB, 0x00, 0x00, // Sample rate: 48000 Hz (little-endian)
+    0xC0, 0x5D, 0x00, 0x00, // Sample rate: 24000 Hz (little-endian) - matches decoderSampleRate
     0x00, 0x00, // Output gain: 0
     0x00,       // Channel mapping: 0 (mono/stereo)
   ]);
@@ -58,7 +59,7 @@ const sendInitCommand = (worker: Worker, audioContextSampleRate: number): void =
     bufferLength: 960 * audioContextSampleRate / 24000,
     decoderSampleRate: 24000,
     outputBufferSampleRate: audioContextSampleRate,
-    resampleQuality: 0,
+    resampleQuality: 3, // High quality resampling (0=low, 3=high) - prevents cluttery/distorted audio
   });
   
   // After a short delay, send warmup BOS page to trigger decoder's internal init
