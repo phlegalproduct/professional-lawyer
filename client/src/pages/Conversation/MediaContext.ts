@@ -8,6 +8,7 @@ type MediaContextType = {
   micDuration: MutableRefObject<number>;
   actualAudioPlayed: MutableRefObject<number>;
   stereoMerger: MutableRefObject<ChannelMergerNode>;
+  onUserRecordingStop?: () => void; // Callback to notify when user stops recording
 };
 
 export const MediaContext = createContext<MediaContextType | null>(null);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import React from "react";
 import { useSocketContext } from "../SocketContext";
 import { decodeMessage } from "../../../protocol/encoder";
 import { useMediaContext } from "../MediaContext";
@@ -57,8 +58,28 @@ type WorkletStats = {
 
 export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const { socket, socketStatus } = useSocketContext();
-  const {startRecording, stopRecording, audioContext, worklet, micDuration, actualAudioPlayed } =
+  const {startRecording, stopRecording, audioContext, worklet, micDuration, actualAudioPlayed, onUserRecordingStop } =
     useMediaContext();
+  const userStoppedRecordingTime = useRef<number | null>(null); // Track when user stopped recording
+  const userRecordingStopCallbackRef = useRef<React.MutableRefObject<(() => void) | null> | null>(null);
+  
+  // Register callback ref from ServerAudio component
+  const registerUserRecordingStopCallback = useCallback((ref: React.MutableRefObject<(() => void) | null>) => {
+    userRecordingStopCallbackRef.current = ref;
+    // Set the callback in the ref
+    ref.current = () => {
+      userStoppedRecordingTime.current = Date.now();
+      console.log(`[AUDIO-DEBUG] User stopped recording - will reset decoder on next audio packet`);
+    };
+  }, []);
+  
+  // Also hook into MediaContext callback if available
+  useEffect(() => {
+    if (onUserRecordingStop) {
+      // The callback will be called by UserAudio component
+      // We've already set up the ref callback above
+    }
+  }, [onUserRecordingStop]);
   const analyser = useRef(audioContext.current.createAnalyser());
   worklet.current.connect(analyser.current);
   const startTime = useRef<number | null>(null);
@@ -69,6 +90,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const receivedDuration = useRef(0);
   const hasStartedPlayingAudio = useRef(false); // Track if we've started playing audio
   const lastAudioMessageTime = useRef<number | null>(null); // Track when we last received audio
+  const lastNonSilentAudioTime = useRef<number | null>(null); // Track when we last received non-silent audio
   const lastPlaybackTime = useRef<number | null>(null); // Track when audio was last playing
   const playbackStoppedTime = useRef<number | null>(null); // Track when playback stopped
   const lastTextMessageCount = useRef(0); // Track text message count to detect new responses
@@ -80,11 +102,36 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     minDelay: 0,
     maxDelay: 0,});
 
+  // Calculate RMS (Root Mean Square) level to detect audio activity
+  const calculateAudioLevel = (samples: Float32Array): number => {
+    let sumSquares = 0;
+    for (let i = 0; i < samples.length; i++) {
+      sumSquares += samples[i] * samples[i];
+    }
+    return Math.sqrt(sumSquares / samples.length);
+  };
+
   const onDecode = useCallback(
     async (data: Float32Array) => {
       const duration = data.length / audioContext.current.sampleRate;
-      receivedDuration.current += duration;
-      console.log(`[AUDIO-DEBUG] Decoded frame: length=${data.length}, duration=${duration.toFixed(3)}s, sampleRate=${audioContext.current.sampleRate}, totalReceived=${receivedDuration.current.toFixed(3)}s, actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s`);
+      const audioLevel = calculateAudioLevel(data);
+      const silenceThreshold = 0.001; // Threshold below which we consider it silence
+      const isSilent = audioLevel < silenceThreshold;
+      
+      const now = Date.now();
+      
+      // Only count non-silent audio towards received duration and update last non-silent time
+      if (!isSilent) {
+        receivedDuration.current += duration;
+        lastNonSilentAudioTime.current = now;
+      }
+      
+      // Only log non-silent frames to reduce console noise
+      if (!isSilent) {
+        console.log(`[AUDIO-DEBUG] Decoded frame: length=${data.length}, duration=${duration.toFixed(3)}s, level=${audioLevel.toFixed(6)}, sampleRate=${audioContext.current.sampleRate}, totalReceived=${receivedDuration.current.toFixed(3)}s, actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s`);
+      }
+      
+      // Always send to worklet (even silent frames) to maintain timing, but track silence
       worklet.current.port.postMessage({frame: data, type: "audio", micDuration: micDuration.current});
     },
     [],
@@ -170,21 +217,30 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53 && // "OggS"
       data.length >= 27 && (data[5] & 0x02) !== 0; // BOS flag set
     
+    // Detect if user just stopped recording (within last 3 seconds)
+    // This is the key signal: user stops -> server starts new response immediately
+    const userJustStoppedRecording = userStoppedRecordingTime.current !== null && 
+      (now - userStoppedRecordingTime.current < 3000) && 
+      hasStartedPlayingAudio.current;
+    
     // Also detect potential new response if:
-    // 1. There's a significant gap (>1000ms) in audio messages, OR
-    // 2. Playback had stopped (>500ms) and new audio is arriving
-    // This handles cases where the server doesn't send a BOS page for subsequent responses
-    // 2 second gap detection for phone-call-like conversation flow (one side speaks at a time)
+    // 1. User just stopped recording (most reliable for phone-call flow), OR
+    // 2. There's a significant gap (>2s) in non-silent audio messages, OR
+    // 3. Playback had stopped (>1s) and new audio is arriving
+    // Use non-silent audio time to avoid false positives from silence packets
+    const timeSinceLastNonSilentAudio = lastNonSilentAudioTime.current ? now - lastNonSilentAudioTime.current : null;
     const hasGapInMessages = hasStartedPlayingAudio.current && 
-      timeSinceLastAudio !== null && 
-      timeSinceLastAudio > 2000 && 
-      !isBOS;
+      timeSinceLastNonSilentAudio !== null && 
+      timeSinceLastNonSilentAudio > 2000 && 
+      !isBOS &&
+      !userJustStoppedRecording; // Don't double-trigger
     
     const playbackHadStopped = playbackStoppedTime.current !== null && 
-      (now - playbackStoppedTime.current > 1000); // Increased to 1 second for more reliable detection
+      (now - playbackStoppedTime.current > 1000) && // Increased to 1 second for more reliable detection
+      !userJustStoppedRecording; // Don't double-trigger
     
     const isLikelyNewResponse = hasStartedPlayingAudio.current && 
-      (hasGapInMessages || playbackHadStopped) && 
+      (userJustStoppedRecording || hasGapInMessages || playbackHadStopped) && 
       !isBOS;
     
     if (isBOS) {
@@ -192,7 +248,14 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     }
     
     if (isLikelyNewResponse) {
-      const reason = hasGapInMessages ? `gap=${timeSinceLastAudio}ms` : `playback stopped ${now - (playbackStoppedTime.current || now)}ms ago`;
+      let reason = '';
+      if (userJustStoppedRecording) {
+        reason = `user stopped recording ${now - (userStoppedRecordingTime.current || now)}ms ago`;
+      } else if (hasGapInMessages) {
+        reason = `gap=${timeSinceLastNonSilentAudio}ms (non-silent)`;
+      } else {
+        reason = `playback stopped ${now - (playbackStoppedTime.current || now)}ms ago`;
+      }
       console.log(`[AUDIO-DEBUG] ⚠️ LIKELY NEW RESPONSE (${reason}) - Resetting worklet and decoder to prevent clutter`);
     }
     
@@ -286,6 +349,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     receivedDuration.current = 0;
     totalAudioMessages.current = 0;
     lastAudioMessageTime.current = null; // Reset audio message timing
+    lastNonSilentAudioTime.current = null; // Reset non-silent audio timing
     lastPlaybackTime.current = null;
     playbackStoppedTime.current = null;
     pendingReset.current = false;
@@ -367,5 +431,6 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     getAudioStats,
     hasCriticalDelay,
     setHasCriticalDelay,
+    registerUserRecordingStopCallback,
   };
 };

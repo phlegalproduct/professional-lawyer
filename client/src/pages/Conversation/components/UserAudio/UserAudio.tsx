@@ -3,6 +3,7 @@ import { useSocketContext } from "../../SocketContext";
 import { useUserAudio } from "../../hooks/useUserAudio";
 import { ClientVisualizer } from "../AudioVisualizer/ClientVisualizer";
 import { type ThemeType } from "../../hooks/useSystemTheme";
+import { useMediaContext } from "../../MediaContext";
 
 type UserAudioProps = {
   theme: ThemeType;
@@ -10,6 +11,7 @@ type UserAudioProps = {
 export const UserAudio: FC<UserAudioProps> = ({theme}) => {
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const { sendMessage, socketStatus } = useSocketContext();
+  const { onUserRecordingStop } = useMediaContext();
   const containerRef = useRef<HTMLDivElement>(null);
   const onRecordingStart = useCallback(() => {
     console.log("Recording started");
@@ -17,7 +19,11 @@ export const UserAudio: FC<UserAudioProps> = ({theme}) => {
 
   const onRecordingStop = useCallback(() => {
     console.log("Recording stopped");
-  }, []);
+    // Notify useServerAudio that user stopped recording
+    if (onUserRecordingStop) {
+      onUserRecordingStop();
+    }
+  }, [onUserRecordingStop]);
 
   const onRecordingChunk = useCallback(
     (chunk: Uint8Array) => {

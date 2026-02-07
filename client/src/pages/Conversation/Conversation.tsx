@@ -100,6 +100,7 @@ export const Conversation:FC<ConversationProps> = ({
   }));
   const isRecording = useRef<boolean>(false);
   const audioChunks = useRef<Blob[]>([]);
+  const userRecordingStopCallbackRef = useRef<(() => void) | null>(null); // Callback for when user stops recording
 
   const audioStreamDestination = useRef<MediaStreamAudioDestinationNode>(audioContext.current!.createMediaStreamDestination());
   const stereoMerger = useRef<ChannelMergerNode>(audioContext.current!.createChannelMerger(2));
@@ -261,6 +262,12 @@ export const Conversation:FC<ConversationProps> = ({
             stereoMerger,
             micDuration,
             actualAudioPlayed,
+            onUserRecordingStop: () => {
+              // Call the callback registered by useServerAudio
+              if (userRecordingStopCallbackRef.current) {
+                userRecordingStopCallbackRef.current();
+              }
+            },
           }
         }>
           <div className="relative player h-full max-h-full w-full justify-between gap-3 md:p-12">
@@ -269,6 +276,7 @@ export const Conversation:FC<ConversationProps> = ({
                   (getAudioStats.current = callback)
                 }
                 theme={theme}
+                onUserRecordingStopRef={userRecordingStopCallbackRef}
               />
               <UserAudio theme={theme}/>
               <div className="pt-8 text-sm flex justify-center items-center flex-col download-links">

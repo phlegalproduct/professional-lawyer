@@ -1,16 +1,25 @@
-import { FC, useRef } from "react";
+import { FC, useRef, useEffect } from "react";
 import { AudioStats, useServerAudio } from "../../hooks/useServerAudio";
 import { ServerVisualizer } from "../AudioVisualizer/ServerVisualizer";
 import { type ThemeType } from "../../hooks/useSystemTheme";
+import { useMediaContext } from "../../MediaContext";
 
 type ServerAudioProps = {
   setGetAudioStats: (getAudioStats: () => AudioStats) => void;
   theme: ThemeType;
+  onUserRecordingStopRef?: React.MutableRefObject<(() => void) | null>; // Ref to callback
 };
-export const ServerAudio: FC<ServerAudioProps> = ({ setGetAudioStats, theme }) => {
-  const { analyser, hasCriticalDelay, setHasCriticalDelay } = useServerAudio({
+export const ServerAudio: FC<ServerAudioProps> = ({ setGetAudioStats, theme, onUserRecordingStopRef }) => {
+  const { analyser, hasCriticalDelay, setHasCriticalDelay, registerUserRecordingStopCallback } = useServerAudio({
     setGetAudioStats,
   });
+  
+  // Register the callback ref with useServerAudio
+  useEffect(() => {
+    if (onUserRecordingStopRef && registerUserRecordingStopCallback) {
+      registerUserRecordingStopCallback(onUserRecordingStopRef);
+    }
+  }, [onUserRecordingStopRef, registerUserRecordingStopCallback]);
   const containerRef = useRef<HTMLDivElement>(null);
   return (
     <>
