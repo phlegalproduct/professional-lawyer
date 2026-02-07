@@ -95,7 +95,21 @@ export const ClientVisualizer: FC<AudioVisualizerProps> = ({ analyser, parent, t
     );
   }, [analyser, drawBars]);
 
+  // Throttle visualizer updates to reduce overhead during long responses
+  const lastVisualizerUpdateRef = useRef<number>(0);
+  const visualizerThrottle = 33; // ~30fps instead of 60fps (reduce from requestAnimationFrame's ~60fps)
+  
   const visualizeData = useCallback(() => {
+    const now = performance.now();
+    const timeSinceLastUpdate = now - lastVisualizerUpdateRef.current;
+    
+    // Throttle to reduce UI overhead
+    if (timeSinceLastUpdate < visualizerThrottle) {
+      requestRef.current = window.requestAnimationFrame(() => visualizeData());
+      return;
+    }
+    lastVisualizerUpdateRef.current = now;
+    
     const width = parent.current ? Math.min(parent.current.clientWidth, parent.current.clientHeight) : 0
     if (width !== canvasWidth) {
       setCanvasWidth(width);

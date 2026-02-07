@@ -12,14 +12,33 @@ export const TextDisplay:FC<TextDisplayProps> = ({
   const currentIndex = text.length - 1;
   const prevScrollTop = useRef(0);
 
+  // Throttle scrolling to reduce UI overhead
+  const scrollTimeoutRef = useRef<number | null>(null);
+  
   useEffect(() => {
-    if (containerRef.current) {
-      prevScrollTop.current = containerRef.current.scrollTop;
-      containerRef.current.scroll({
-        top: containerRef.current.scrollHeight,
-        behavior: "smooth",
-      });
+    // Clear any pending scroll
+    if (scrollTimeoutRef.current !== null) {
+      clearTimeout(scrollTimeoutRef.current);
     }
+    
+    // Throttle scroll updates to reduce overhead
+    scrollTimeoutRef.current = window.setTimeout(() => {
+      if (containerRef.current) {
+        prevScrollTop.current = containerRef.current.scrollTop;
+        // Use 'auto' instead of 'smooth' for better performance
+        containerRef.current.scroll({
+          top: containerRef.current.scrollHeight,
+          behavior: "auto", // Changed from "smooth" to "auto" for better performance
+        });
+      }
+      scrollTimeoutRef.current = null;
+    }, 300); // Throttle scroll updates to every 300ms
+    
+    return () => {
+      if (scrollTimeoutRef.current !== null) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+    };
   }, [text]);
 
   return (

@@ -137,12 +137,30 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     [],
   );
 
+  // Throttle worklet message processing to reduce UI overhead during long responses
+  const lastWorkletUpdateTime = useRef<number>(0);
+  const workletUpdateThrottle = 100; // Only process worklet messages every 100ms
+  
   const onWorkletMessage = useCallback(
     (event: MessageEvent<WorkletStats>) => {
       const prevActualPlayed = workletStats.current.actualAudioPlayed;
       const now = Date.now();
+      
+      // Always update the stats ref (needed for audio processing)
       workletStats.current = event.data;
       actualAudioPlayed.current = workletStats.current.actualAudioPlayed;
+      
+      // Throttle UI/logging updates to reduce overhead
+      const timeSinceLastUpdate = now - lastWorkletUpdateTime.current;
+      if (timeSinceLastUpdate < workletUpdateThrottle) {
+        // Still track critical state changes even when throttled
+        if (workletStats.current.actualAudioPlayed > prevActualPlayed) {
+          lastPlaybackTime.current = now;
+          playbackStoppedTime.current = null;
+        }
+        return; // Skip UI/logging updates
+      }
+      lastWorkletUpdateTime.current = now;
       
       // Track when we've started playing audio
       if (workletStats.current.actualAudioPlayed > 0 && !hasStartedPlayingAudio.current) {
@@ -164,9 +182,9 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         }
       }
       
-      // Log significant state changes
-      if (workletStats.current.actualAudioPlayed > prevActualPlayed + 0.1) {
-        console.log(`[AUDIO-DEBUG] Worklet stats update: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s (+${(workletStats.current.actualAudioPlayed - prevActualPlayed).toFixed(3)}s), totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s, minDelay=${workletStats.current.minDelay.toFixed(3)}s, maxDelay=${workletStats.current.maxDelay.toFixed(3)}s`);
+      // Log significant state changes (less frequently)
+      if (workletStats.current.actualAudioPlayed > prevActualPlayed + 0.5) {
+        console.log(`[AUDIO-DEBUG] Worklet stats update: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s (+${(workletStats.current.actualAudioPlayed - prevActualPlayed).toFixed(3)}s), totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s`);
       }
     },
     [],

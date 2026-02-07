@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 
 type ServerAudioStatsProps = {
   getAudioStats: React.MutableRefObject<
@@ -14,11 +14,8 @@ type ServerAudioStatsProps = {
 };
 
 export const ServerAudioStats = ({ getAudioStats }: ServerAudioStatsProps) => {
-  const [audioStats, setAudioStats] = useState(getAudioStats.current());
-
-  const movingAverageSum = useRef<number>(0.);
-  const movingAverageCount = useRef<number>(0.);
-  const movingBeta = 0.85;
+  // Disable real-time refresh to save performance - only show initial stats
+  const [audioStats] = useState(getAudioStats.current());
 
   let convertMinSecs = (total_secs: number) => {
     // convert secs to the format mm:ss.cc
@@ -34,20 +31,8 @@ export const ServerAudioStats = ({ getAudioStats }: ServerAudioStatsProps) => {
     return mins + ":" + secs + "." + cents;
   };
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const newAudioStats = getAudioStats.current();
-      setAudioStats(newAudioStats);
-      movingAverageCount.current *= movingBeta;
-      movingAverageCount.current += (1 - movingBeta) * 1;
-      movingAverageSum.current *= movingBeta;
-      movingAverageSum.current += (1 - movingBeta) * newAudioStats.delay;
-
-    }, 141);
-    return () => {
-      clearInterval(interval);
-    };
-  }, []);
+  // Removed auto-refresh interval to save performance during audio playback
+  // Stats will only show initial values and won't update in real-time
 
   return (
     <div className="w-full rounded-lg text-zinc-500 p-2">
@@ -64,7 +49,7 @@ export const ServerAudioStats = ({ getAudioStats }: ServerAudioStatsProps) => {
           </tr>
           <tr>
             <td className="text-md pr-2">Latency: </td>
-            <td>{(movingAverageSum.current / movingAverageCount.current).toFixed(3)}</td>
+            <td>{audioStats.delay.toFixed(3)}</td>
           </tr>
           <tr>
             <td className="text-md pr-2">Min/Max buffer: </td>
