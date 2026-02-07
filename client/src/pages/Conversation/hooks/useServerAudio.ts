@@ -174,13 +174,14 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     // 1. There's a significant gap (>1000ms) in audio messages, OR
     // 2. Playback had stopped (>500ms) and new audio is arriving
     // This handles cases where the server doesn't send a BOS page for subsequent responses
+    // 2 second gap detection for phone-call-like conversation flow (one side speaks at a time)
     const hasGapInMessages = hasStartedPlayingAudio.current && 
       timeSinceLastAudio !== null && 
-      timeSinceLastAudio > 1000 && 
+      timeSinceLastAudio > 2000 && 
       !isBOS;
     
     const playbackHadStopped = playbackStoppedTime.current !== null && 
-      (now - playbackStoppedTime.current > 500);
+      (now - playbackStoppedTime.current > 1000); // Increased to 1 second for more reliable detection
     
     const isLikelyNewResponse = hasStartedPlayingAudio.current && 
       (hasGapInMessages || playbackHadStopped) && 
@@ -263,51 +264,10 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         decodeAudio(message.data);
         //For stats purposes for now
         totalAudioMessages.current++;
-      } else if (message.type === "text") {
-        // Text message indicates a new response is starting
-        // Reset decoder and worklet when we detect a new text message after audio has been playing
-        if (hasStartedPlayingAudio.current && decoderWorker.current) {
-          console.log(`[AUDIO-DEBUG] ⚠️ NEW TEXT MESSAGE - New response starting, resetting worklet and decoder`);
-          console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s`);
-          
-          // Set flag to reset state FIRST
-          pendingReset.current = true; // Mark that we're resetting - drop packets during reset
-          hasStartedPlayingAudio.current = false;
-          receivedDuration.current = 0;
-          lastPlaybackTime.current = null;
-          playbackStoppedTime.current = null;
-          
-          // Reset worklet
-          worklet.current.port.postMessage({type: "reset"});
-          
-          // Re-initialize decoder worker
-          const bufferLength = 960 * audioContext.current.sampleRate / 24000;
-          decoderWorker.current.postMessage({
-            command: "init",
-            bufferLength: bufferLength,
-            decoderSampleRate: 24000,
-            outputBufferSampleRate: audioContext.current.sampleRate,
-            resampleQuality: 3,
-          });
-          console.log(`[AUDIO-DEBUG]   Decoder re-initialized (triggered by text message)`);
-          
-          // Send warmup BOS page and clear reset flag after decoder has time to initialize
-          setTimeout(() => {
-            const bosPage = createWarmupBosPage();
-            decoderWorker.current?.postMessage({
-              command: "decode",
-              pages: bosPage,
-            });
-            console.log(`[AUDIO-DEBUG]   Warmup BOS page sent to re-initialized decoder`);
-            
-            // Clear reset flag after warmup BOS is sent (decoder should be ready now)
-            setTimeout(() => {
-              pendingReset.current = false;
-              console.log(`[AUDIO-DEBUG]   Reset complete, ready for new audio packets`);
-            }, 20);
-          }, 100);
-        }
-      }
+      // Note: We do NOT reset on text messages because:
+      // 1. Text messages arrive incrementally during a response (as tokens are generated)
+      // 2. Resetting on every text message causes stuttering/cutting words
+      // 3. We rely on audio-based detection (gaps, playback stops, BOS pages) instead
     },
     [decodeAudio],
   );
