@@ -38,6 +38,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const totalAudioMessages = useRef(0);
   const receivedDuration = useRef(0);
   const hasStartedPlayingAudio = useRef(false); // Track if we've started playing audio
+  const lastAudioMessageTime = useRef<number | null>(null); // Track when we last received audio
   const workletStats = useRef<WorkletStats>({
     totalAudioPlayed: 0,
     actualAudioPlayed: 0,
@@ -104,24 +105,53 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       return;
     }
     
+    const now = Date.now();
+    const timeSinceLastAudio = lastAudioMessageTime.current ? now - lastAudioMessageTime.current : null;
+    lastAudioMessageTime.current = now;
+    
     // Detect BOS (Beginning of Stream) page - indicates a new Opus stream
     // This happens when a new audio response starts
     const isBOS = data.length >= 4 && 
       data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53 && // "OggS"
       data.length >= 27 && (data[5] & 0x02) !== 0; // BOS flag set
     
+    // Also detect potential new response if there's a significant gap (>1000ms) in audio messages
+    // This handles cases where the server doesn't send a BOS page for subsequent responses
+    // A gap of >1 second typically indicates the previous response ended and a new one is starting
+    const isLikelyNewResponse = hasStartedPlayingAudio.current && 
+      timeSinceLastAudio !== null && 
+      timeSinceLastAudio > 1000 && 
+      !isBOS;
+    
     if (isBOS) {
       console.log(`[AUDIO-DEBUG] BOS page detected: size=${data.length}, hasStartedPlaying=${hasStartedPlayingAudio.current}, actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, totalMessages=${totalAudioMessages.current}`);
     }
     
-    if (isBOS && hasStartedPlayingAudio.current) {
-      // New Opus stream detected after we've started playing audio - reset worklet BEFORE decoding
+    if (isLikelyNewResponse) {
+      console.log(`[AUDIO-DEBUG] ⚠️ LIKELY NEW RESPONSE (gap=${timeSinceLastAudio}ms) - Resetting worklet and decoder to prevent clutter`);
+    }
+    
+    if ((isBOS && hasStartedPlayingAudio.current) || isLikelyNewResponse) {
+      // New Opus stream detected after we've started playing audio - reset worklet AND decoder BEFORE decoding
       // This prevents distortion/clutter from carrying over between responses
-      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet to prevent clutter`);
+      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet and decoder to prevent clutter`);
       console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s`);
+      
+      // Reset worklet
       worklet.current.port.postMessage({type: "reset"});
+      
+      // Reset decoder worker by sending a reset command (if supported)
+      // The decoder worker may have internal state (like resampler state) that needs clearing
+      decoderWorker.current.postMessage({command: "reset"});
+      console.log(`[AUDIO-DEBUG]   Decoder reset command sent (if supported, decoder will reset its internal state)`);
+      
+      // Note: If decoder doesn't support reset, it will ignore the command and continue.
+      // This is usually fine as Opus decoders handle new streams via BOS pages.
+      // However, if clutter persists, we may need to re-initialize the decoder worker.
+      
       // Reset the flag so we don't reset on the very next BOS
       hasStartedPlayingAudio.current = false;
+      receivedDuration.current = 0;
       console.log(`[AUDIO-DEBUG]   Reset complete, hasStartedPlayingAudio set to false`);
     }
     
@@ -170,6 +200,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     hasStartedPlayingAudio.current = false; // Reset flag on new connection
     receivedDuration.current = 0;
     totalAudioMessages.current = 0;
+    lastAudioMessageTime.current = null; // Reset audio message timing
     console.log(`[AUDIO-DEBUG]   Worklet reset sent, flags cleared`);
     console.log(Date.now() % 1000, "Should start in a bit - decoder ready:", decoderReady);
     startRecording();
