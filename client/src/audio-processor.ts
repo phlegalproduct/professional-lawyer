@@ -15,7 +15,7 @@ class MoshiProcessor extends AudioWorkletProcessor {
     super();
     console.log(`[WORKLET-DEBUG] ═══ MoshiProcessor initialized ═══`);
     console.log(`[WORKLET-DEBUG]   currentFrame: ${currentFrame}, sampleRate: ${sampleRate} Hz, currentTime: ${currentTime}`);
-    console.log(`[WORKLET-DEBUG]   === MOSHI WORKLET CUSTOM BUILD v4 ===`);
+    console.log(`[WORKLET-DEBUG]   === MOSHI WORKLET CUSTOM BUILD v5 ===`);
 
     // ===== WAN-SAFE BUFFER DEFAULTS (smooth > latency) =====
     // These values target ~250–400ms RTT with jitter.
