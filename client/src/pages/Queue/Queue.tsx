@@ -163,27 +163,30 @@ export const Queue:FC = () => {
 
   const startProcessor = useCallback(async () => {
     if(!audioContext.current) {
+      console.log(`[AUDIO-DEBUG] ═══ Creating AudioContext ═══`);
       // Try to create AudioContext with 24000 Hz to match server audio and avoid resampling
       // If browser doesn't support 24000 Hz, it will silently use a different rate (usually 48000)
       audioContext.current = new AudioContext({ sampleRate: 24000 });
       const actualSampleRate = audioContext.current.sampleRate;
+      console.log(`[AUDIO-DEBUG]   Requested: 24000 Hz, Got: ${actualSampleRate} Hz`);
       
       // If browser doesn't support 24000 Hz, recreate with default to be explicit
       // The decoder will use high-quality resampling (quality 3) to convert 24kHz server audio
       if (actualSampleRate !== 24000) {
-        console.warn(`Browser does not support 24000 Hz. Requested 24000 Hz but got ${actualSampleRate} Hz.`);
-        console.warn(`Recreating AudioContext with default sample rate. Decoder will use high-quality resampling.`);
+        console.warn(`[AUDIO-DEBUG] ⚠️ Browser does not support 24000 Hz. Requested 24000 Hz but got ${actualSampleRate} Hz.`);
+        console.warn(`[AUDIO-DEBUG]   Recreating AudioContext with default sample rate. Decoder will use high-quality resampling.`);
         const oldContext = audioContext.current;
         audioContext.current = new AudioContext();
         await oldContext.close();
-        console.log(`AudioContext created at ${audioContext.current.sampleRate} Hz (decoder will resample from 24kHz with quality 3)`);
+        console.log(`[AUDIO-DEBUG]   AudioContext recreated at ${audioContext.current.sampleRate} Hz (decoder will resample from 24kHz with quality 3)`);
       } else {
-        console.log(`AudioContext successfully created at 24000 Hz (no resampling needed)`);
+        console.log(`[AUDIO-DEBUG] ✅ AudioContext successfully created at 24000 Hz (no resampling needed)`);
       }
       
       // Prewarm decoder worker as soon as we have audio context
       // This gives WASM time to load while user grants mic access
       // The decoder is configured with resampleQuality: 3 for high-quality resampling
+      console.log(`[AUDIO-DEBUG]   Prewarming decoder worker with sampleRate: ${audioContext.current.sampleRate} Hz`);
       prewarmDecoderWorker(audioContext.current.sampleRate);
     }
     if(worklet.current) {

@@ -37,6 +37,7 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const [hasCriticalDelay, setHasCriticalDelay] = useState(false);
   const totalAudioMessages = useRef(0);
   const receivedDuration = useRef(0);
+  const hasStartedPlayingAudio = useRef(false); // Track if we've started playing audio
   const workletStats = useRef<WorkletStats>({
     totalAudioPlayed: 0,
     actualAudioPlayed: 0,
@@ -46,7 +47,9 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
 
   const onDecode = useCallback(
     async (data: Float32Array) => {
-      receivedDuration.current += data.length / audioContext.current.sampleRate;
+      const duration = data.length / audioContext.current.sampleRate;
+      receivedDuration.current += duration;
+      console.log(`[AUDIO-DEBUG] Decoded frame: length=${data.length}, duration=${duration.toFixed(3)}s, sampleRate=${audioContext.current.sampleRate}, totalReceived=${receivedDuration.current.toFixed(3)}s, actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s`);
       worklet.current.port.postMessage({frame: data, type: "audio", micDuration: micDuration.current});
     },
     [],
@@ -54,8 +57,20 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
 
   const onWorkletMessage = useCallback(
     (event: MessageEvent<WorkletStats>) => {
+      const prevActualPlayed = workletStats.current.actualAudioPlayed;
       workletStats.current = event.data;
       actualAudioPlayed.current = workletStats.current.actualAudioPlayed;
+      
+      // Track when we've started playing audio
+      if (workletStats.current.actualAudioPlayed > 0 && !hasStartedPlayingAudio.current) {
+        hasStartedPlayingAudio.current = true;
+        console.log(`[AUDIO-DEBUG] Audio playback started! actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s`);
+      }
+      
+      // Log significant state changes
+      if (workletStats.current.actualAudioPlayed > prevActualPlayed + 0.1) {
+        console.log(`[AUDIO-DEBUG] Worklet stats update: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s (+${(workletStats.current.actualAudioPlayed - prevActualPlayed).toFixed(3)}s), totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s, minDelay=${workletStats.current.minDelay.toFixed(3)}s, maxDelay=${workletStats.current.maxDelay.toFixed(3)}s`);
+      }
     },
     [],
   );
@@ -90,16 +105,24 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     }
     
     // Detect BOS (Beginning of Stream) page - indicates a new Opus stream
-    // This happens when a new audio response starts after the first one
+    // This happens when a new audio response starts
     const isBOS = data.length >= 4 && 
       data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53 && // "OggS"
       data.length >= 27 && (data[5] & 0x02) !== 0; // BOS flag set
     
-    if (isBOS && workletStats.current.actualAudioPlayed > 0) {
-      // New Opus stream detected after first response - reset worklet to clear accumulated state
-      // This prevents distortion from resampler state carrying over between responses
-      console.log(Date.now() % 1000, "New Opus stream detected (BOS) after first response, resetting worklet to prevent clutter");
+    if (isBOS) {
+      console.log(`[AUDIO-DEBUG] BOS page detected: size=${data.length}, hasStartedPlaying=${hasStartedPlayingAudio.current}, actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, totalMessages=${totalAudioMessages.current}`);
+    }
+    
+    if (isBOS && hasStartedPlayingAudio.current) {
+      // New Opus stream detected after we've started playing audio - reset worklet BEFORE decoding
+      // This prevents distortion/clutter from carrying over between responses
+      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet to prevent clutter`);
+      console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s`);
       worklet.current.port.postMessage({type: "reset"});
+      // Reset the flag so we don't reset on the very next BOS
+      hasStartedPlayingAudio.current = false;
+      console.log(`[AUDIO-DEBUG]   Reset complete, hasStartedPlayingAudio set to false`);
     }
     
     if (midx < 5) {
@@ -140,11 +163,18 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     if (!currentSocket || socketStatus !== "connected" || !decoderReady) {
       return;
     }
+    console.log(`[AUDIO-DEBUG] Connection established - Initializing audio pipeline`);
+    console.log(`[AUDIO-DEBUG]   AudioContext sampleRate: ${audioContext.current.sampleRate} Hz`);
+    console.log(`[AUDIO-DEBUG]   Decoder ready: ${decoderReady}`);
     worklet.current.port.postMessage({type: "reset"});
+    hasStartedPlayingAudio.current = false; // Reset flag on new connection
+    receivedDuration.current = 0;
+    totalAudioMessages.current = 0;
+    console.log(`[AUDIO-DEBUG]   Worklet reset sent, flags cleared`);
     console.log(Date.now() % 1000, "Should start in a bit - decoder ready:", decoderReady);
     startRecording();
     currentSocket.addEventListener("message", onSocketMessage);
-    totalAudioMessages.current = 0;
+    console.log(`[AUDIO-DEBUG]   Socket message listener attached, recording started`);
     return () => {
       console.log("Stop recording called in unknown function.")
       stopRecording();
@@ -185,13 +215,14 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       
       if (prewarmed) {
         // Prewarmed worker is already initialized
-        console.log("Prewarmed decoder worker ready, setting decoderReady=true");
+        console.log(`[AUDIO-DEBUG] Prewarmed decoder worker ready, sampleRate: ${audioContext.current.sampleRate} Hz`);
         setDecoderReady(true);
       } else {
         // Initialize fresh worker and wait for it to be ready
+        console.log(`[AUDIO-DEBUG] Initializing fresh decoder worker with sampleRate: ${audioContext.current.sampleRate} Hz`);
         await initDecoder(workerInstance, audioContext.current.sampleRate);
         if (mounted) {
-          console.log("Fresh decoder worker ready, setting decoderReady=true");
+          console.log(`[AUDIO-DEBUG] Fresh decoder worker initialized, sampleRate: ${audioContext.current.sampleRate} Hz`);
           setDecoderReady(true);
         }
       }

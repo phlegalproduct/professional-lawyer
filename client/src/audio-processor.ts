@@ -13,9 +13,9 @@ function asSamples(ms) {
 class MoshiProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    console.log("******Moshi processor lives", currentFrame, sampleRate);
-	  console.log("=== MOSHI WORKLET CUSTOM BUILD v4 ===");
-    console.log(currentTime);
+    console.log(`[WORKLET-DEBUG] ═══ MoshiProcessor initialized ═══`);
+    console.log(`[WORKLET-DEBUG]   currentFrame: ${currentFrame}, sampleRate: ${sampleRate} Hz, currentTime: ${currentTime}`);
+    console.log(`[WORKLET-DEBUG]   === MOSHI WORKLET CUSTOM BUILD v4 ===`);
 
     // ===== WAN-SAFE BUFFER DEFAULTS (smooth > latency) =====
     // These values target ~250–400ms RTT with jitter.
@@ -37,27 +37,45 @@ class MoshiProcessor extends AudioWorkletProcessor {
 
     this.port.onmessage = (event) => {
       if (event.data?.type === "reset") {
-        console.log("Reset audio processor state.");
+        const beforeReset = {
+          frames: this.frames.length,
+          samples: this.currentSamples(),
+          actualPlayed: this.actualAudioPlayed,
+          totalPlayed: this.totalAudioPlayed,
+          started: this.started
+        };
+        console.log(`[WORKLET-DEBUG] ⚠️ RESET REQUESTED`);
+        console.log(`[WORKLET-DEBUG]   Before reset: frames=${beforeReset.frames}, samples=${beforeReset.samples}, actualPlayed=${beforeReset.actualPlayed.toFixed(3)}s, totalPlayed=${beforeReset.totalPlayed.toFixed(3)}s, started=${beforeReset.started}`);
         this.initState();
+        console.log(`[WORKLET-DEBUG]   After reset: frames=${this.frames.length}, samples=${this.currentSamples()}, actualPlayed=${this.actualAudioPlayed.toFixed(3)}s, totalPlayed=${this.totalAudioPlayed.toFixed(3)}s, started=${this.started}`);
         return;
       }
 
       const frame = event.data.frame;
-      if (!frame || !frame.length) return;
+      if (!frame || !frame.length) {
+        console.log(`[WORKLET-DEBUG] Received empty or invalid frame, ignoring`);
+        return;
+      }
 
+      const beforePush = {
+        frames: this.frames.length,
+        samples: this.currentSamples(),
+        started: this.started
+      };
       this.frames.push(frame);
+      const afterPush = {
+        frames: this.frames.length,
+        samples: this.currentSamples()
+      };
 
       if (this.currentSamples() >= this.initialBufferSamples && !this.started) {
+        console.log(`[WORKLET-DEBUG] 🎵 Starting playback: buffer=${asMs(this.currentSamples())}ms (threshold: ${asMs(this.initialBufferSamples)}ms)`);
         this.start();
       }
 
       if (this.pidx < 30) {
         console.log(
-          this.timestamp(),
-          "Got packet",
-          this.pidx++,
-          asMs(this.currentSamples()),
-          asMs(frame.length)
+          `[WORKLET-DEBUG] Frame received: idx=${this.pidx++}, frameLength=${frame.length}, bufferSamples=${asMs(this.currentSamples())}ms, frameDuration=${asMs(frame.length)}ms, totalFrames=${this.frames.length}, started=${this.started}`
         );
       }
 
@@ -106,6 +124,12 @@ class MoshiProcessor extends AudioWorkletProcessor {
   }
 
   initState() {
+    const prevState = {
+      frames: this.frames?.length || 0,
+      actualPlayed: this.actualAudioPlayed || 0,
+      totalPlayed: this.totalAudioPlayed || 0
+    };
+    
     this.frames = [];
     this.offsetInFirstBuffer = 0;
     this.firstOut = false;
@@ -126,8 +150,11 @@ class MoshiProcessor extends AudioWorkletProcessor {
     this.lastSample = 0.0;
 
     // Never shrink these (prevents oscillation / gating)
-    this.partialBufferSamples = Math.max(this.partialBufferSamples, asSamples(120));
-    this.maxBufferSamples = Math.max(this.maxBufferSamples, asSamples(1500));
+    this.partialBufferSamples = Math.max(this.partialBufferSamples || asSamples(120), asSamples(120));
+    this.maxBufferSamples = Math.max(this.maxBufferSamples || asSamples(1500), asSamples(1500));
+    
+    console.log(`[WORKLET-DEBUG] State initialized: prevFrames=${prevState.frames}, prevActualPlayed=${prevState.actualPlayed.toFixed(3)}s, prevTotalPlayed=${prevState.totalPlayed.toFixed(3)}s`);
+    console.log(`[WORKLET-DEBUG]   Buffer config: initial=${asMs(this.initialBufferSamples)}ms, partial=${asMs(this.partialBufferSamples)}ms, max=${asMs(this.maxBufferSamples)}ms`);
   }
 
   totalMaxBufferSamples() {
@@ -181,7 +208,7 @@ class MoshiProcessor extends AudioWorkletProcessor {
     }
 
     if (this.firstOut) {
-      console.log(this.timestamp(), "Audio resumed", asMs(this.currentSamples()), this.remainingPartialBufferSamples);
+      console.log(`[WORKLET-DEBUG] 🔊 Audio output started: buffer=${asMs(this.currentSamples())}ms, remainingPartial=${this.remainingPartialBufferSamples}, frames=${this.frames.length}, actualPlayed=${this.actualAudioPlayed.toFixed(3)}s`);
     }
 
     let out_idx = 0;
@@ -195,24 +222,6 @@ class MoshiProcessor extends AudioWorkletProcessor {
       // Use set() for efficient copying, then clamp and validate
       output.set(first.subarray(sourceStart, sourceStart + to_copy), out_idx);
       
-      // Smooth transition from last frame to prevent discontinuities (helps with resampling artifacts)
-      // This is especially important when resampling causes frame boundary discontinuities
-      if (out_idx === 0 && this.offsetInFirstBuffer === 0 && this.actualAudioPlayed > 0 && isFinite(this.lastSample)) {
-        const firstSample = output[0];
-        if (isFinite(firstSample)) {
-          const diff = Math.abs(firstSample - this.lastSample);
-          // Only crossfade if there's a significant discontinuity (> 0.01) to avoid unnecessary processing
-          if (diff > 0.01) {
-            // Very short crossfade (4 samples) to smooth frame boundary transitions
-            const crossfadeLength = Math.min(4, to_copy);
-            for (let i = 0; i < crossfadeLength; i++) {
-              const fade = i / crossfadeLength;
-              output[i] = this.lastSample * (1 - fade) + output[i] * fade;
-            }
-          }
-        }
-      }
-      
       // Check and fix any out-of-range or invalid samples
       for (let i = 0; i < to_copy; i++) {
         const sample = output[out_idx + i];
@@ -225,7 +234,7 @@ class MoshiProcessor extends AudioWorkletProcessor {
         }
       }
       
-      // Store last sample for next frame transition
+      // Store last sample for tracking (used for debugging/monitoring)
       if (to_copy > 0) {
         this.lastSample = output[out_idx + to_copy - 1];
       }
@@ -257,12 +266,14 @@ class MoshiProcessor extends AudioWorkletProcessor {
     // If we underrun, DO NOT call resetStart() (that causes gated/stuttery audio).
     // Instead, pad the rest of the buffer with silence and keep streaming.
     if (out_idx < output.length) {
-      console.log(this.timestamp(), "Underrun padded", output.length - out_idx);
+      const underrunSamples = output.length - out_idx;
+      console.log(`[WORKLET-DEBUG] ⚠️ BUFFER UNDERRUN: outputLength=${output.length}, out_idx=${out_idx}, underrun=${underrunSamples} samples (${asMs(underrunSamples)}ms), buffer=${asMs(this.currentSamples())}ms, frames=${this.frames.length}, actualPlayed=${this.actualAudioPlayed.toFixed(3)}s`);
 
       // Grow partial buffer so future playback has more headroom
+      const prevPartial = this.partialBufferSamples;
       this.partialBufferSamples += this.partialBufferIncrement;
       this.partialBufferSamples = Math.min(this.partialBufferSamples, this.maxPartialWithIncrements);
-      console.log("Increased partial buffer to", asMs(this.partialBufferSamples));
+      console.log(`[WORKLET-DEBUG]   Increased partial buffer: ${asMs(prevPartial)}ms -> ${asMs(this.partialBufferSamples)}ms`);
 
       // Smooth fade-out on the last samples to avoid clicks - only if we have samples
       if (out_idx > 0) {
@@ -283,9 +294,16 @@ class MoshiProcessor extends AudioWorkletProcessor {
       output.fill(0, out_idx);
     }
 
-    this.totalAudioPlayed += output.length / sampleRate;
-    this.actualAudioPlayed += out_idx / sampleRate;
-    this.timeInStream += out_idx / sampleRate;
+    const outputDuration = output.length / sampleRate;
+    const actualDuration = out_idx / sampleRate;
+    this.totalAudioPlayed += outputDuration;
+    this.actualAudioPlayed += actualDuration;
+    this.timeInStream += actualDuration;
+    
+    // Log periodically to track playback health
+    if (Math.floor(this.totalAudioPlayed * 10) % 5 === 0 && this.totalAudioPlayed > 0.1) {
+      console.log(`[WORKLET-DEBUG] Playback stats: actualPlayed=${this.actualAudioPlayed.toFixed(3)}s, totalPlayed=${this.totalAudioPlayed.toFixed(3)}s, buffer=${asMs(this.currentSamples())}ms, frames=${this.frames.length}, underrun=${outputDuration - actualDuration > 0.001 ? 'YES' : 'NO'}`);
+    }
 
     return true;
   }

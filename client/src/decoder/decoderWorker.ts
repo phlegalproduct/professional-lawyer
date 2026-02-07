@@ -54,9 +54,19 @@ const createWorkerWithErrorTracking = (): Worker => {
 
 // Send init command to a worker, then send warmup BOS page
 const sendInitCommand = (worker: Worker, audioContextSampleRate: number): void => {
+  const bufferLength = 960 * audioContextSampleRate / 24000;
+  const needsResampling = audioContextSampleRate !== 24000;
+  
+  console.log(`[DECODER-DEBUG] Initializing decoder worker:`);
+  console.log(`[DECODER-DEBUG]   decoderSampleRate: 24000 Hz`);
+  console.log(`[DECODER-DEBUG]   outputBufferSampleRate: ${audioContextSampleRate} Hz`);
+  console.log(`[DECODER-DEBUG]   bufferLength: ${bufferLength}`);
+  console.log(`[DECODER-DEBUG]   resampleQuality: 3 (high quality)`);
+  console.log(`[DECODER-DEBUG]   needsResampling: ${needsResampling} (${needsResampling ? `${audioContextSampleRate/24000}x` : 'none'})`);
+  
   worker.postMessage({
     command: "init",
-    bufferLength: 960 * audioContextSampleRate / 24000,
+    bufferLength: bufferLength,
     decoderSampleRate: 24000,
     outputBufferSampleRate: audioContextSampleRate,
     resampleQuality: 3, // High quality resampling (0=low, 3=high) - prevents cluttery/distorted audio
@@ -65,7 +75,7 @@ const sendInitCommand = (worker: Worker, audioContextSampleRate: number): void =
   // After a short delay, send warmup BOS page to trigger decoder's internal init
   setTimeout(() => {
     const bosPage = createWarmupBosPage();
-    console.log("Sending warmup BOS page to decoder");
+    console.log(`[DECODER-DEBUG] Sending warmup BOS page to decoder (size: ${bosPage.length} bytes)`);
     worker.postMessage({
       command: "decode",
       pages: bosPage,
