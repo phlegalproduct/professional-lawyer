@@ -195,7 +195,7 @@ export const Queue:FC = () => {
       worklet.current = new AudioWorkletNode(ctx, 'moshi-processor');
     } catch (err) {
       //await ctx.audioWorklet.addModule(moshiProcessorUrl);
-      await ctx.audioWorklet.addModule(`${moshiProcessorUrl}?v=3`);
+      await ctx.audioWorklet.addModule(`${moshiProcessorUrl}?v=4`);
 
 	worklet.current = new AudioWorkletNode(ctx, 'moshi-processor');
     }

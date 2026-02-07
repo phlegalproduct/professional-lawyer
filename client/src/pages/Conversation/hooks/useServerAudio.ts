@@ -88,6 +88,20 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       console.warn("Decoder worker not ready, dropping audio packet");
       return;
     }
+    
+    // Detect BOS (Beginning of Stream) page - indicates a new Opus stream
+    // This happens when a new audio response starts after the first one
+    const isBOS = data.length >= 4 && 
+      data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53 && // "OggS"
+      data.length >= 27 && (data[5] & 0x02) !== 0; // BOS flag set
+    
+    if (isBOS && workletStats.current.actualAudioPlayed > 0) {
+      // New Opus stream detected after first response - reset worklet to clear accumulated state
+      // This prevents distortion from resampler state carrying over between responses
+      console.log(Date.now() % 1000, "New Opus stream detected (BOS) after first response, resetting worklet to prevent clutter");
+      worklet.current.port.postMessage({type: "reset"});
+    }
+    
     if (midx < 5) {
       // Log first few packets with size info for debugging
       const hasOggS = data.length >= 4 && 
@@ -96,7 +110,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         micDuration.current - workletStats.current.actualAudioPlayed, 
         midx++, 
         "size:", data.length, 
-        "hasOggS:", hasOggS);
+        "hasOggS:", hasOggS,
+        "isBOS:", isBOS);
     }
     decoderWorker.current.postMessage(
       {

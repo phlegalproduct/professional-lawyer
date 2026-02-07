@@ -121,6 +121,9 @@ class MoshiProcessor extends AudioWorkletProcessor {
 
     // Debug
     this.pidx = 0;
+    
+    // Track last sample for smooth frame transitions (prevents resampling discontinuities)
+    this.lastSample = 0.0;
 
     // Never shrink these (prevents oscillation / gating)
     this.partialBufferSamples = Math.max(this.partialBufferSamples, asSamples(120));
@@ -189,10 +192,28 @@ class MoshiProcessor extends AudioWorkletProcessor {
       let to_copy = Math.min(first.length - this.offsetInFirstBuffer, output.length - out_idx);
       const sourceStart = this.offsetInFirstBuffer;
       
-      // Use set() for efficient copying, then clamp only if needed
+      // Use set() for efficient copying, then clamp and validate
       output.set(first.subarray(sourceStart, sourceStart + to_copy), out_idx);
       
-      // Check and fix any out-of-range or invalid samples (should be rare)
+      // Smooth transition from last frame to prevent discontinuities (helps with resampling artifacts)
+      // This is especially important when resampling causes frame boundary discontinuities
+      if (out_idx === 0 && this.offsetInFirstBuffer === 0 && this.actualAudioPlayed > 0 && isFinite(this.lastSample)) {
+        const firstSample = output[0];
+        if (isFinite(firstSample)) {
+          const diff = Math.abs(firstSample - this.lastSample);
+          // Only crossfade if there's a significant discontinuity (> 0.01) to avoid unnecessary processing
+          if (diff > 0.01) {
+            // Very short crossfade (4 samples) to smooth frame boundary transitions
+            const crossfadeLength = Math.min(4, to_copy);
+            for (let i = 0; i < crossfadeLength; i++) {
+              const fade = i / crossfadeLength;
+              output[i] = this.lastSample * (1 - fade) + output[i] * fade;
+            }
+          }
+        }
+      }
+      
+      // Check and fix any out-of-range or invalid samples
       for (let i = 0; i < to_copy; i++) {
         const sample = output[out_idx + i];
         if (!isFinite(sample)) {
@@ -202,6 +223,11 @@ class MoshiProcessor extends AudioWorkletProcessor {
         } else if (sample < -1.0) {
           output[out_idx + i] = -1.0;
         }
+      }
+      
+      // Store last sample for next frame transition
+      if (to_copy > 0) {
+        this.lastSample = output[out_idx + to_copy - 1];
       }
       
       this.offsetInFirstBuffer += to_copy;
