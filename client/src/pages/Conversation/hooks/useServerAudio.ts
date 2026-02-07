@@ -39,6 +39,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const receivedDuration = useRef(0);
   const hasStartedPlayingAudio = useRef(false); // Track if we've started playing audio
   const lastAudioMessageTime = useRef<number | null>(null); // Track when we last received audio
+  const lastPlaybackTime = useRef<number | null>(null); // Track when audio was last playing
+  const playbackStoppedTime = useRef<number | null>(null); // Track when playback stopped
   const workletStats = useRef<WorkletStats>({
     totalAudioPlayed: 0,
     actualAudioPlayed: 0,
@@ -59,13 +61,28 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const onWorkletMessage = useCallback(
     (event: MessageEvent<WorkletStats>) => {
       const prevActualPlayed = workletStats.current.actualAudioPlayed;
+      const now = Date.now();
       workletStats.current = event.data;
       actualAudioPlayed.current = workletStats.current.actualAudioPlayed;
       
       // Track when we've started playing audio
       if (workletStats.current.actualAudioPlayed > 0 && !hasStartedPlayingAudio.current) {
         hasStartedPlayingAudio.current = true;
+        lastPlaybackTime.current = now;
+        playbackStoppedTime.current = null;
         console.log(`[AUDIO-DEBUG] Audio playback started! actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s`);
+      }
+      
+      // Track playback activity - if actualAudioPlayed is increasing, audio is playing
+      if (workletStats.current.actualAudioPlayed > prevActualPlayed) {
+        lastPlaybackTime.current = now;
+        playbackStoppedTime.current = null;
+      } else if (hasStartedPlayingAudio.current && lastPlaybackTime.current && (now - lastPlaybackTime.current > 500)) {
+        // Audio has stopped playing for >500ms
+        if (!playbackStoppedTime.current) {
+          playbackStoppedTime.current = now;
+          console.log(`[AUDIO-DEBUG] ⚠️ Playback stopped detected (no progress for ${now - lastPlaybackTime.current}ms)`);
+        }
       }
       
       // Log significant state changes
@@ -115,12 +132,20 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       data[0] === 0x4F && data[1] === 0x67 && data[2] === 0x67 && data[3] === 0x53 && // "OggS"
       data.length >= 27 && (data[5] & 0x02) !== 0; // BOS flag set
     
-    // Also detect potential new response if there's a significant gap (>1000ms) in audio messages
+    // Also detect potential new response if:
+    // 1. There's a significant gap (>1000ms) in audio messages, OR
+    // 2. Playback had stopped (>500ms) and new audio is arriving
     // This handles cases where the server doesn't send a BOS page for subsequent responses
-    // A gap of >1 second typically indicates the previous response ended and a new one is starting
-    const isLikelyNewResponse = hasStartedPlayingAudio.current && 
+    const hasGapInMessages = hasStartedPlayingAudio.current && 
       timeSinceLastAudio !== null && 
       timeSinceLastAudio > 1000 && 
+      !isBOS;
+    
+    const playbackHadStopped = playbackStoppedTime.current !== null && 
+      (now - playbackStoppedTime.current > 500);
+    
+    const isLikelyNewResponse = hasStartedPlayingAudio.current && 
+      (hasGapInMessages || playbackHadStopped) && 
       !isBOS;
     
     if (isBOS) {
@@ -128,30 +153,37 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     }
     
     if (isLikelyNewResponse) {
-      console.log(`[AUDIO-DEBUG] ⚠️ LIKELY NEW RESPONSE (gap=${timeSinceLastAudio}ms) - Resetting worklet and decoder to prevent clutter`);
+      const reason = hasGapInMessages ? `gap=${timeSinceLastAudio}ms` : `playback stopped ${now - (playbackStoppedTime.current || now)}ms ago`;
+      console.log(`[AUDIO-DEBUG] ⚠️ LIKELY NEW RESPONSE (${reason}) - Resetting worklet and decoder to prevent clutter`);
     }
     
     if ((isBOS && hasStartedPlayingAudio.current) || isLikelyNewResponse) {
-      // New Opus stream detected after we've started playing audio - reset worklet AND decoder BEFORE decoding
+      // New Opus stream detected after we've started playing audio - reset worklet AND re-initialize decoder BEFORE decoding
       // This prevents distortion/clutter from carrying over between responses
-      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet and decoder to prevent clutter`);
+      // The server uses a single continuous Opus stream, so we need to reset decoder state between responses
+      console.log(`[AUDIO-DEBUG] ⚠️ NEW OPUS STREAM AFTER FIRST RESPONSE - Resetting worklet and re-initializing decoder to prevent clutter`);
       console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s, delay=${workletStats.current.delay.toFixed(3)}s`);
       
       // Reset worklet
       worklet.current.port.postMessage({type: "reset"});
       
-      // Reset decoder worker by sending a reset command (if supported)
-      // The decoder worker may have internal state (like resampler state) that needs clearing
-      decoderWorker.current.postMessage({command: "reset"});
-      console.log(`[AUDIO-DEBUG]   Decoder reset command sent (if supported, decoder will reset its internal state)`);
+      // Re-initialize decoder worker to clear all internal state (resampler, buffers, etc.)
+      // The decoder worker doesn't support a "reset" command, so we must re-init it
+      const bufferLength = 960 * audioContext.current.sampleRate / 24000;
+      decoderWorker.current.postMessage({
+        command: "init",
+        bufferLength: bufferLength,
+        decoderSampleRate: 24000,
+        outputBufferSampleRate: audioContext.current.sampleRate,
+        resampleQuality: 3, // High quality resampling
+      });
+      console.log(`[AUDIO-DEBUG]   Decoder re-initialized with sampleRate=${audioContext.current.sampleRate}Hz, bufferLength=${bufferLength}`);
       
-      // Note: If decoder doesn't support reset, it will ignore the command and continue.
-      // This is usually fine as Opus decoders handle new streams via BOS pages.
-      // However, if clutter persists, we may need to re-initialize the decoder worker.
-      
-      // Reset the flag so we don't reset on the very next BOS
+      // Reset the flags so we don't reset on the very next BOS
       hasStartedPlayingAudio.current = false;
       receivedDuration.current = 0;
+      lastPlaybackTime.current = null;
+      playbackStoppedTime.current = null;
       console.log(`[AUDIO-DEBUG]   Reset complete, hasStartedPlayingAudio set to false`);
     }
     
@@ -201,6 +233,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     receivedDuration.current = 0;
     totalAudioMessages.current = 0;
     lastAudioMessageTime.current = null; // Reset audio message timing
+    lastPlaybackTime.current = null;
+    playbackStoppedTime.current = null;
     console.log(`[AUDIO-DEBUG]   Worklet reset sent, flags cleared`);
     console.log(Date.now() % 1000, "Should start in a bit - decoder ready:", decoderReady);
     startRecording();
