@@ -4,6 +4,36 @@ import { decodeMessage } from "../../../protocol/encoder";
 import { useMediaContext } from "../MediaContext";
 import { createDecoderWorker, initDecoder, getPrewarmedWorker } from "../../../decoder/decoderWorker";
 
+// Helper to create a warmup BOS page for decoder initialization
+const createWarmupBosPage = (): Uint8Array => {
+  const opusHead = new Uint8Array([
+    0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, // "OpusHead"
+    0x01,       // Version 1
+    0x01,       // 1 channel (mono)
+    0x38, 0x01, // Pre-skip: 312 samples (little-endian)
+    0xC0, 0x5D, 0x00, 0x00, // Sample rate: 24000 Hz (little-endian)
+    0x00, 0x00, // Output gain: 0
+    0x00,       // Channel mapping: 0 (mono/stereo)
+  ]);
+  
+  const pageHeader = new Uint8Array([
+    0x4F, 0x67, 0x67, 0x53, // "OggS" magic
+    0x00,       // Version 0
+    0x02,       // BOS flag (Beginning of Stream)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Granule position: 0
+    0x01, 0x00, 0x00, 0x00, // Stream serial: 1
+    0x00, 0x00, 0x00, 0x00, // Page sequence: 0
+    0x00, 0x00, 0x00, 0x00, // CRC (will be invalid but decoder doesn't check)
+    0x01,       // 1 segment
+    0x13,       // Segment size: 19 bytes (OpusHead)
+  ]);
+  
+  const bosPage = new Uint8Array(pageHeader.length + opusHead.length);
+  bosPage.set(pageHeader, 0);
+  bosPage.set(opusHead, pageHeader.length);
+  return bosPage;
+};
+
 export type AudioStats = {
   playedAudioDuration: number;
   missedAudioDuration: number;
@@ -41,6 +71,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
   const lastAudioMessageTime = useRef<number | null>(null); // Track when we last received audio
   const lastPlaybackTime = useRef<number | null>(null); // Track when audio was last playing
   const playbackStoppedTime = useRef<number | null>(null); // Track when playback stopped
+  const lastTextMessageCount = useRef(0); // Track text message count to detect new responses
+  const pendingReset = useRef(false); // Flag to indicate decoder reset is pending
   const workletStats = useRef<WorkletStats>({
     totalAudioPlayed: 0,
     actualAudioPlayed: 0,
@@ -122,6 +154,12 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       return;
     }
     
+    // If decoder reset is pending, drop this packet to avoid decoding with stale state
+    if (pendingReset.current) {
+      console.log(`[AUDIO-DEBUG] Dropping audio packet during decoder reset`);
+      return;
+    }
+    
     const now = Date.now();
     const timeSinceLastAudio = lastAudioMessageTime.current ? now - lastAudioMessageTime.current : null;
     lastAudioMessageTime.current = now;
@@ -179,6 +217,16 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
       });
       console.log(`[AUDIO-DEBUG]   Decoder re-initialized with sampleRate=${audioContext.current.sampleRate}Hz, bufferLength=${bufferLength}`);
       
+      // Send warmup BOS page after a short delay to trigger decoder's internal init
+      setTimeout(() => {
+        const bosPage = createWarmupBosPage();
+        decoderWorker.current?.postMessage({
+          command: "decode",
+          pages: bosPage,
+        });
+        console.log(`[AUDIO-DEBUG]   Warmup BOS page sent to re-initialized decoder`);
+      }, 50);
+      
       // Reset the flags so we don't reset on the very next BOS
       hasStartedPlayingAudio.current = false;
       receivedDuration.current = 0;
@@ -215,6 +263,50 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
         decodeAudio(message.data);
         //For stats purposes for now
         totalAudioMessages.current++;
+      } else if (message.type === "text") {
+        // Text message indicates a new response is starting
+        // Reset decoder and worklet when we detect a new text message after audio has been playing
+        if (hasStartedPlayingAudio.current && decoderWorker.current) {
+          console.log(`[AUDIO-DEBUG] ⚠️ NEW TEXT MESSAGE - New response starting, resetting worklet and decoder`);
+          console.log(`[AUDIO-DEBUG]   Before reset: actualPlayed=${workletStats.current.actualAudioPlayed.toFixed(3)}s, totalPlayed=${workletStats.current.totalAudioPlayed.toFixed(3)}s`);
+          
+          // Set flag to reset state FIRST
+          pendingReset.current = true; // Mark that we're resetting - drop packets during reset
+          hasStartedPlayingAudio.current = false;
+          receivedDuration.current = 0;
+          lastPlaybackTime.current = null;
+          playbackStoppedTime.current = null;
+          
+          // Reset worklet
+          worklet.current.port.postMessage({type: "reset"});
+          
+          // Re-initialize decoder worker
+          const bufferLength = 960 * audioContext.current.sampleRate / 24000;
+          decoderWorker.current.postMessage({
+            command: "init",
+            bufferLength: bufferLength,
+            decoderSampleRate: 24000,
+            outputBufferSampleRate: audioContext.current.sampleRate,
+            resampleQuality: 3,
+          });
+          console.log(`[AUDIO-DEBUG]   Decoder re-initialized (triggered by text message)`);
+          
+          // Send warmup BOS page and clear reset flag after decoder has time to initialize
+          setTimeout(() => {
+            const bosPage = createWarmupBosPage();
+            decoderWorker.current?.postMessage({
+              command: "decode",
+              pages: bosPage,
+            });
+            console.log(`[AUDIO-DEBUG]   Warmup BOS page sent to re-initialized decoder`);
+            
+            // Clear reset flag after warmup BOS is sent (decoder should be ready now)
+            setTimeout(() => {
+              pendingReset.current = false;
+              console.log(`[AUDIO-DEBUG]   Reset complete, ready for new audio packets`);
+            }, 20);
+          }, 100);
+        }
       }
     },
     [decodeAudio],
@@ -235,6 +327,8 @@ export const useServerAudio = ({setGetAudioStats}: useServerAudioArgs) => {
     lastAudioMessageTime.current = null; // Reset audio message timing
     lastPlaybackTime.current = null;
     playbackStoppedTime.current = null;
+    pendingReset.current = false;
+    lastTextMessageCount.current = 0;
     console.log(`[AUDIO-DEBUG]   Worklet reset sent, flags cleared`);
     console.log(Date.now() % 1000, "Should start in a bit - decoder ready:", decoderReady);
     startRecording();
