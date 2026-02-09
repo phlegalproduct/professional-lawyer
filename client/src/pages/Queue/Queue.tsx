@@ -54,9 +54,9 @@ const Homepage = ({
   return (
     <div className="text-center h-screen w-screen p-4 flex flex-col items-center pt-8">
       <div className="mb-6">
-        <h1 className="text-4xl text-black">PersonaPlex</h1>
+        <h1 className="text-4xl text-black">Voice Call</h1>
         <p className="text-sm text-gray-600 mt-2">
-          Full duplex conversational AI with text and voice control.
+          Place or manage your call.
         </p>
       </div>
 

@@ -34,7 +34,7 @@ import tarfile
 import time
 import secrets
 import sys
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 
 import aiohttp
 from aiohttp import web
@@ -84,6 +84,56 @@ def wrap_with_system_tags(text: str) -> str:
     if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
         return cleaned
     return f"<system> {cleaned} <system>"
+
+
+def is_outbound_call(text_prompt: str) -> bool:
+    """Detect if the prompt indicates an outbound cold call.
+    
+    Checks for keywords that indicate the agent initiated the call rather than receiving it.
+    """
+    if not text_prompt:
+        return False
+    
+    prompt_lower = text_prompt.lower()
+    outbound_keywords = [
+        "outbound",
+        "cold call",
+        "initiated this call",
+        "you initiated",
+        "not an inbound agent",
+        "not a receptionist",
+        "not customer support",
+        "did not receive a call",
+        "you are not an inbound",
+        "cold, outbound",
+    ]
+    
+    return any(keyword in prompt_lower for keyword in outbound_keywords)
+
+
+def get_bad_token_ids(text_tokenizer, bad_phrases: List[str]) -> torch.Tensor:
+    """Get token IDs for phrases that should be blocked during generation.
+    
+    Args:
+        text_tokenizer: SentencePiece tokenizer
+        bad_phrases: List of phrases to block
+        
+    Returns:
+        Tensor of token IDs to block, or empty tensor if none found
+    """
+    bad_token_set = set()
+    for phrase in bad_phrases:
+        try:
+            # Encode phrase and get all token IDs
+            token_ids = text_tokenizer.encode(phrase, add_bos=False, add_eos=False)
+            bad_token_set.update(token_ids)
+        except Exception:
+            # Skip phrases that can't be tokenized
+            continue
+    
+    if bad_token_set:
+        return torch.tensor(list(bad_token_set), dtype=torch.long)
+    return torch.tensor([], dtype=torch.long)
 
 
 @dataclass
@@ -167,8 +217,38 @@ class ServerState:
                 self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
             else:
                 self.lm_gen.load_voice_prompt(voice_prompt_path)
-        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(request.query["text_prompt"])) if len(request.query["text_prompt"]) > 0 else None
+        text_prompt = request.query["text_prompt"]
+        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt)) if len(text_prompt) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
+        
+        # Detect outbound calls and configure bad token blocking
+        is_outbound = is_outbound_call(text_prompt)
+        if is_outbound:
+            # Block inbound greeting phrases and any AI disclosure
+            bad_phrases = [
+                "Good morning",
+                "Good afternoon", 
+                "Good evening",
+                "Thank you for calling",
+                "How can I assist",
+                "How can I help",
+                "How may I assist",
+                "How may I help",
+                # Avoid revealing that a non-human is calling (distinctive phrases only)
+                "automated call",
+                "AI assistant",
+                "virtual agent",
+                "I am an AI",
+                "I'm an AI",
+                "this is a bot",
+                "this is an AI",
+            ]
+            bad_token_ids = get_bad_token_ids(self.text_tokenizer, bad_phrases)
+            # Move to same device as model
+            self.lm_gen.bad_token_ids = bad_token_ids.to(self.device) if bad_token_ids.numel() > 0 else None
+            clog.log("info", f"Outbound call detected. Blocking {bad_token_ids.numel()} bad token IDs.")
+        else:
+            self.lm_gen.bad_token_ids = None
 
         async def recv_loop():
             nonlocal close
@@ -283,6 +363,54 @@ class ServerState:
             await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
             self.mimi.reset_streaming()
             clog.log("info", "done with system prompts")
+            
+            # For outbound calls, generate initial utterance before waiting for user input
+            if is_outbound:
+                clog.log("info", "Generating initial outbound utterance...")
+                initial_utterance_count = 0
+                # Generate for approximately 3 seconds
+                frame_count = int(3.0 * self.lm_gen._frame_rate)
+                silence_pcm = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=self.device)
+                
+                for frame_idx in range(frame_count):
+                    if not await is_alive():
+                        break
+                    
+                    # Encode silence as user audio input (simulating no user speaking)
+                    codes = self.mimi.encode(silence_pcm)
+                    _ = self.other_mimi.encode(silence_pcm)
+                    
+                    # Step through each code in the encoded frame
+                    for c in range(codes.shape[-1]):
+                        if not await is_alive():
+                            break
+                        
+                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                        if tokens is None:
+                            continue
+                        
+                        # Decode and send audio
+                        assert tokens.shape[1] == self.lm_gen.lm_model.dep_q + 1
+                        main_pcm = self.mimi.decode(tokens[:, 1:9])
+                        _ = self.other_mimi.decode(tokens[:, 1:9])
+                        main_pcm = main_pcm.cpu()
+                        opus_writer.append_pcm(main_pcm[0, 0].numpy())
+                        
+                        # Send text token if valid
+                        text_token = tokens[0, 0, 0].item()
+                        if text_token not in (0, 3):
+                            _text = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
+                            _text = _text.replace("▁", " ")
+                            msg = b"\x02" + bytes(_text, encoding="utf8")
+                            await ws.send_bytes(msg)
+                        
+                        initial_utterance_count += 1
+                    
+                    # Small delay between frames
+                    await asyncio.sleep(0.001)
+                
+                clog.log("info", f"Generated {initial_utterance_count} tokens of initial utterance")
+            
             # Send the handshake.
             if await is_alive():
                 await ws.send_bytes(b"\x00")

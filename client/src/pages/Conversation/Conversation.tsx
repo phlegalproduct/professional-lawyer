@@ -272,7 +272,7 @@ export const Conversation:FC<ConversationProps> = ({
               />
               <UserAudio theme={theme}/>
               <div className="pt-8 text-sm flex justify-center items-center flex-col download-links">
-                {audioURL && <div><a href={audioURL} download={`personaplex_audio.${getExtension("audio")}`} className="pt-2 text-center block">Download audio</a></div>}
+                {audioURL && <div><a href={audioURL} download={`call_recording.${getExtension("audio")}`} className="pt-2 text-center block">Download recording</a></div>}
               </div>
           </div>
           <div className="scrollbar player-text" ref={textContainerRef}>

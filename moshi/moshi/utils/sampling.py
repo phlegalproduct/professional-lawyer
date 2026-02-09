@@ -30,6 +30,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from typing import Optional
 import torch
 
 
@@ -109,8 +110,26 @@ def sample_token(
     temp: float = 1.0,
     top_k: int = 0,
     top_p: float = 0.0,
+    bad_token_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Given logits of shape [*, Card], returns a LongTensor of shape [*]."""
+    """Given logits of shape [*, Card], returns a LongTensor of shape [*].
+    
+    Args:
+        logits: Token logits of shape [*, Card]
+        use_sampling: Whether to use sampling or greedy decoding
+        temp: Temperature for sampling
+        top_k: Top-k sampling parameter
+        top_p: Top-p (nucleus) sampling parameter
+        bad_token_ids: Optional tensor of token IDs to block (set to -inf)
+    """
+    # Block bad tokens by setting their logits to -inf
+    if bad_token_ids is not None:
+        logits = logits.clone()
+        # bad_token_ids should be a 1D tensor of token IDs
+        if bad_token_ids.numel() > 0:
+            # Set logits for bad tokens to a very negative value
+            logits[..., bad_token_ids] = float('-inf')
+    
     # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
     if use_sampling and temp > 0.0:
         probs = torch.softmax(logits / temp, dim=-1)

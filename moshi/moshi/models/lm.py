@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from os.path import splitext
+import asyncio
 import logging
 import numpy as np
 import sys
@@ -697,6 +698,7 @@ class LMGen(StreamingModule[_LMGenState]):
         self.voice_prompt_audio: Optional[torch.Tensor] = None
         self.voice_prompt_cache: Optional[torch.Tensor] = None
         self.voice_prompt_embeddings: Optional[torch.Tensor] = None
+        self.bad_token_ids: Optional[torch.Tensor] = None  # Token IDs to block during generation
         #self.voice_prompt_mimi_streaming_state: Optional[StreamingStateDict] = None
 
     def _init_streaming_state(self, batch_size: int) -> _LMGenState:
@@ -878,12 +880,16 @@ class LMGen(StreamingModule[_LMGenState]):
         lm_model = self.lm_model
 
         # Shape of text_logits should be [B, K_text=1, T=1, Card_text]
-        sampled_text_token = sample_token(
-            text_logits.float(),
+        # Reshape logits for sample_token: [B, 1, 1, Card] -> [B*1*1, Card] -> sample -> reshape back
+        logits_reshaped = text_logits.float().reshape(-1, text_logits.shape[-1])
+        sampled_text_token_flat = sample_token(
+            logits_reshaped,
             self.use_sampling,
             self.temp_text,
             self.top_k_text,
+            bad_token_ids=self.bad_token_ids,
         )
+        sampled_text_token = sampled_text_token_flat.reshape(text_logits.shape[:-1])
         assert sampled_text_token.dim() == 3, sampled_text_token.shape
         assert sampled_text_token.shape[2] == 1
         assert sampled_text_token.shape[1] == 1, "Only one text stream supported."
@@ -1125,6 +1131,51 @@ class LMGen(StreamingModule[_LMGenState]):
         self._step_audio_silence()
         self._step_text_prompt()
         self._step_audio_silence()
+
+    async def generate_initial_utterance_async(
+        self,
+        mimi,
+        duration_seconds: float = 3.0,
+        is_alive: Optional[Callable] = None,
+    ):
+        """Generate initial agent utterance without user input (for outbound calls).
+        
+        Args:
+            mimi: MimiModel for encoding user audio (we'll use silence)
+            duration_seconds: Approximate duration to generate (default 3 seconds)
+            is_alive: Optional callback to check if connection is still alive
+            
+        Yields:
+            Tuple of (audio_tokens, text_token_id) for each generated frame
+        """
+        frame_count = int(duration_seconds * self._frame_rate)
+        # Create silence audio chunk
+        silence_pcm = torch.zeros(1, 1, self._frame_size, dtype=torch.float32, device=self.lm_model.device)
+        
+        for _ in range(frame_count):
+            if is_alive is not None and not await is_alive():
+                break
+            
+            # Encode silence as user audio input
+            codes = mimi.encode(silence_pcm)
+            _ = mimi.encode(silence_pcm)  # For other_mimi consistency
+            
+            # Step through each code in the encoded frame
+            for c in range(codes.shape[-1]):
+                if is_alive is not None and not await is_alive():
+                    break
+                    
+                # Generate tokens from silence input
+                tokens = self.step(codes[:, :, c: c + 1])
+                
+                if tokens is not None:
+                    text_token_id = tokens[0, 0, 0].item()
+                    yield tokens, text_token_id
+                else:
+                    yield None, None
+            
+            # Small delay to prevent overwhelming
+            await asyncio.sleep(0.001)
 
     def depformer_step(
         self,
