@@ -18,7 +18,7 @@ const VOICE_OPTIONS = [
 const TEXT_PROMPT_PRESETS = [
   {
     label: "Assistant (default)",
-    text: "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.",
+    text: "You are professional and precise. Speak clearly and concisely. Stay on topic, answer directly, and match the tone of the conversation. Suitable for any type of dialogue.",
   },
   {
     label: "Medical office (service)",
@@ -86,10 +86,10 @@ const Homepage = ({
             onChange={(e) => setTextPrompt(e.target.value)}
             className="w-full h-32 min-h-[80px] max-h-64 p-3 bg-white text-black border border-gray-300 rounded resize-y focus:outline-none focus:ring-2 focus:ring-[#76b900] focus:border-transparent"
             placeholder="Enter your text prompt..."
-            maxLength={1000}
+            maxLength={3000}
           />
           <div className="text-right text-xs text-gray-500 mt-1">
-            {textPrompt.length}/1000
+            {textPrompt.length}/3000
           </div>
         </div>
 

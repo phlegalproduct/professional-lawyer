@@ -332,7 +332,7 @@ def main():
     parser.add_argument(
         "--output-text", required=True, type=str, help="Path to output JSON file of agent text to write"
     )
-    parser.add_argument("--text-prompt", default="You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.", type=str, help="Text prompt")
+    parser.add_argument("--text-prompt", default="You are professional and precise. Speak clearly and concisely. Stay on topic, answer directly, and match the tone of the conversation. Suitable for any type of dialogue.", type=str, help="Text prompt")
 
     parser.add_argument(
         "--voice-prompt", required=True, type=str, help="Voice prompt filename (basename) inside --voice-prompt-dir (e.g. 'NATM1.pt')."

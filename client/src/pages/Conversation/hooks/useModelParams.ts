@@ -1,14 +1,14 @@
 import { useCallback, useState } from "react";
 import {useLocalStorage} from './useLocalStorage';
 
-export const DEFAULT_TEXT_TEMPERATURE = 0.7;
+export const DEFAULT_TEXT_TEMPERATURE = 0.5;
 export const DEFAULT_TEXT_TOPK = 25;
-export const DEFAULT_AUDIO_TEMPERATURE = 0.8;
+export const DEFAULT_AUDIO_TEMPERATURE = 0.65;
 export const DEFAULT_AUDIO_TOPK = 250;
 export const DEFAULT_PAD_MULT = 0;
 export const DEFAULT_REPETITION_PENALTY_CONTEXT = 64;
-export const DEFAULT_REPETITION_PENALTY = 1.0;
-export const DEFAULT_TEXT_PROMPT = "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.";
+export const DEFAULT_REPETITION_PENALTY = 1.1;
+export const DEFAULT_TEXT_PROMPT = "You are professional and precise. Speak clearly and concisely. Stay on topic, answer directly, and match the tone of the conversation. Suitable for any type of dialogue.";
 export const DEFAULT_VOICE_PROMPT = "NATF0.pt";
 export const DEFAULT_RANDOM_SEED = -1;
 
